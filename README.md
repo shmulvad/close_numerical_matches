@@ -53,9 +53,9 @@ array([], dtype=int64)
 >>> find_matches(arr0, arr1, tol=0.60001, dist='max')
 array([[1, 2]])
 >>> manhatten_dist = lambda arr: np.sum(np.abs(arr), axis=1)
->>> matches = find_matches(arr0, arr1, tol=0.11, dist=manhatten_dist)
+>>> matches = find_matches(arr0, arr1, tol=1.0001, dist=manhatten_dist)
 >>> matches
-array([[0, 1], [0, 1], [2, 1]])
+array([[0, 0], [0, 1], [2, 1]])
 >>> indices0, indices1 = matches.T
 >>> arr0[indices0]
 array([[25, 24], [25, 24], [25, 26]])
@@ -72,16 +72,16 @@ from timeit import default_timer as timer
 import numpy as np
 from close_numerical_matches import naive_find_matches, find_matches
 
-arr1 = np.random.rand(320_000, 2)
-arr2 = np.random.rand(44_000, 2)
+arr0 = np.random.rand(320_000, 2)
+arr1 = np.random.rand(44_000, 2)
 
 start = timer()
-naive_find_matches(arr1, arr2, tol=0.001)
+naive_find_matches(arr0, arr1, tol=0.001)
 end = timer()
 print(end - start)  # 255.335 s
 
 start = timer()
-find_matches(arr1, arr2, tol=0.001)
+find_matches(arr0, arr1, tol=0.001)
 end = timer()
 print(end - start)  # 5.821 s
 ```
