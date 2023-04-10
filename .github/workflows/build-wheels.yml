@@ -21,9 +21,9 @@ jobs:
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v2
       with:
-        python-version: ${{ matrix.builds.python_requires }}
+        python-version: 3.11
     - name: Install deps
-      run: python -m pip install cibuildwheel==2.11.1 twine==4.0.1  numpy
+      run: python -m pip install cibuildwheel==2.11.1 twine==4.0.1 numpy
     - name: Build wheels
       if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
       env:
