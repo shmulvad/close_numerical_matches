@@ -1,48 +1,64 @@
-from typing import Tuple, Dict, List, Callable, Union
+from __future__ import annotations
+
 import itertools
+from typing import Callable
+from typing import Generator
+from typing import Union
 
 import numpy as np
 
-Key = Tuple[int, ...]
-Bucket = Tuple[List[int], List[int]]
 DistFunc = Callable[[np.ndarray], np.ndarray]
 DistFuncArg = Union[str, DistFunc]
 
 OVERHEAD_MULT = 5
 NORM, MAX = 'norm', 'max'
 
+DELTAS_1D = [-1, 0, 1]
+
 
 def _get_dist_func(dist_metric: DistFuncArg) -> DistFunc:
     """Returns the appropriate distance function for a given dist_metric"""
     if isinstance(dist_metric, str):
         if dist_metric == NORM:
-            def norm(ndarray):
-                return np.linalg.norm(ndarray, axis=1)
+            def norm(arr: np.ndarray) -> np.ndarray:
+                return np.linalg.norm(arr, axis=1)
             return norm
 
         if dist_metric == MAX:
-            def max_abs(ndarray):
-                return np.max(np.abs(ndarray), axis=1)
+            def max_abs(arr: np.ndarray) -> np.ndarray:
+                return np.max(np.abs(arr), axis=1)
             return max_abs
 
-        raise ValueError((f'If dist_metric is a string, it has to be {NORM}'
-                          + f' or {MAX} but got {dist_metric}'))
+        raise ValueError(
+            f'If dist_metric is a string, it has to be {NORM}'
+            + f' or {MAX} but got {dist_metric}',
+        )
 
     if callable(dist_metric):
         test_res = dist_metric(np.array([[1, 1]]))
-        if (isinstance(test_res, np.ndarray)
-                and len(test_res.shape) == 1 and len(test_res) == 1):
+        is_valid = (
+            isinstance(test_res, np.ndarray)
+            and len(test_res.shape) == 1
+            and len(test_res) == 1
+        )
+        if is_valid:
             return dist_metric
 
-        raise ValueError("Supplied distance function doesn't return array of "
-                         + ' expected shape')
+        raise ValueError(
+            "Supplied distance function doesn't return array of expected shape",
+        )
 
     raise ValueError('Got distance metric of unexpected type')
 
 
-def _naive_find_matches(arr0: np.ndarray, arr0_indices: np.ndarray,
-                        arr1: np.ndarray, arr1_indices: np.ndarray,
-                        dist_func: DistFunc, tol: float) -> List[List[int]]:
+def _naive_find_matches(
+    arr0: np.ndarray,
+    arr0_indices: Union[list[int], np.ndarray],  # noqa: UP007
+    arr1: np.ndarray,
+    arr1_indices: Union[list[int], np.ndarray],  # noqa: UP007
+    dist_func: DistFunc,
+    tol: float,
+) -> list[list[int]]:
     """
     Finds matching indices within tolerance using nested for-loop approach.
     Only considers the indices given by the `arr0_indices` and `arr1_indices`
@@ -66,13 +82,15 @@ def _naive_find_matches(arr0: np.ndarray, arr0_indices: np.ndarray,
         arr0, arr0_indices, arr1, arr1_indices \
             = arr1, arr1_indices, arr0, arr0_indices
 
-    matches = []
+    matches: list[list[int]] = []
     arr1_filtered = arr1[arr1_indices]
     for arr0_idx in arr0_indices:
+        arr0_idx = int(arr0_idx)
         row = arr0[arr0_idx]
         inner_diff = dist_func(arr1_filtered - row)
         inner_matches_idx = np.where(inner_diff <= tol)[0]
-        matches.extend([arr0_idx, arr1_indices[i]] for i in inner_matches_idx)
+        new_matches: list[list[int]] = [[arr0_idx, int(arr1_indices[i])] for i in inner_matches_idx]
+        matches.extend(new_matches)
 
     if matches and reverse:
         matches = list(np.array(matches)[::, ::-1])
@@ -80,15 +98,18 @@ def _naive_find_matches(arr0: np.ndarray, arr0_indices: np.ndarray,
     return matches
 
 
-def _assign_to_buckets(arr0: np.ndarray, arr1: np.ndarray, bucket_tol: float)\
-                       -> Dict[Key, Bucket]:
+def _assign_to_buckets(
+    arr0: np.ndarray,
+    arr1: np.ndarray,
+    bucket_tol: float,
+) -> dict[tuple[int, ...], tuple[list[int], list[int]]]:
     """
     Takes two 2D arrays of numbers and a tolerance `bucket_tol` and assigns
     their indices to buckets based on these values
     """
-    buckets = {}
+    buckets: dict[tuple[int, ...], tuple[list[int], list[int]]] = {}
 
-    def assign_arr_to_buckets(arr: np.ndarray, arr_num: int):
+    def assign_arr_to_buckets(arr: np.ndarray, arr_num: int) -> None:
         for i, row in enumerate(arr):
             key = tuple(int(elm // bucket_tol) for elm in row)
             if key not in buckets:
@@ -101,25 +122,27 @@ def _assign_to_buckets(arr0: np.ndarray, arr1: np.ndarray, bucket_tol: float)\
     return buckets
 
 
-def _make_deltas_iter(dim: int) -> List[Key]:
+def _make_deltas_iter(dim: int) -> Generator[tuple[int, ...], None, None]:
     """
     Constructs the delta values to use together with the base element for a
     given dimension to visit all neighbours and the base element itself
 
     Examples
     --------
-    >>> _make_deltas_iter(1)
+    >>> list(_make_deltas_iter(1))
     [(-1,), (0,), (1,)]
-    >>> _make_deltas_iter(2)
+    >>> list(_make_deltas_iter(2))
     [(-1, -1), (-1, 0), (-1, 1),
      (0, -1), (0, 0), (0, 1),
      (1, -1), (1, 0), (1, 1)]
     """
-    DELTAS_1D = [-1, 0, 1]
-    return list(itertools.product(*tuple([DELTAS_1D] * dim)))
+    yield from itertools.product(*tuple([DELTAS_1D] * dim))
 
 
-def _bucket_keys_to_check(key: Key, deltas_iter: List[Key]) -> List[Key]:
+def _bucket_keys_to_check(
+    key: tuple[int, ...],
+    deltas_iter: list[tuple[int, ...]],
+) -> list[tuple[int, ...]]:
     """
     Returns a list of the keys to iterate for a given key and the deltas
 
@@ -130,13 +153,18 @@ def _bucket_keys_to_check(key: Key, deltas_iter: List[Key]) -> List[Key]:
     >>> _bucket_keys_to_check((5, 7), _make_deltas_iter(2))
     [(4, 6), (4, 7), (4, 8), (5, 6), (5, 7), (5, 8), (6, 6), (6, 7), (6, 8)]
     """
-    return [tuple(key_elm + delta for key_elm, delta in zip(key, deltas))
-            for deltas in deltas_iter]
+    return [
+        tuple(key_elm + delta for key_elm, delta in zip(key, deltas))
+        for deltas in deltas_iter
+    ]
 
 
-def naive_find_matches(arr0: np.ndarray, arr1: np.ndarray,
-                       dist: DistFuncArg = NORM, tol: float = 0.1) \
-                       -> np.ndarray:
+def naive_find_matches(
+    arr0: Union[np.ndarray, list[list[Union[int, float]]]],  # noqa: UP007
+    arr1: Union[np.ndarray, list[list[Union[int, float]]]],  # noqa: UP007
+    dist: DistFuncArg = NORM,
+    tol: float = 0.1,
+) -> np.ndarray:
     """
     Finds matching indices within tolerance using nested for-loop approach.
     parameters. Runtime is O(nmd) for two arrays of shape (n, d) and (m, d)
@@ -176,7 +204,8 @@ def naive_find_matches(arr0: np.ndarray, arr1: np.ndarray,
     array([[0, 1], [0, 2], [1, 0]])
     """
     # Construct ndarrays if pure Python lists are passed in
-    arr0, arr1 = np.array(arr0, copy=False), np.array(arr1, copy=False)
+    arr0 = np.array(arr0, copy=False)
+    arr1 = np.array(arr1, copy=False)
 
     assert len(arr0.shape) == len(arr1.shape) == 2, \
         f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
@@ -187,15 +216,24 @@ def naive_find_matches(arr0: np.ndarray, arr1: np.ndarray,
 
     assert tol > 0, f'Tolerance has to be strictly positive but got {tol}'
 
-    dist_func = _get_dist_func(dist)
-    arr0_indices, arr1_indices = np.arange(len(arr0)), np.arange(len(arr1))
-    matches = _naive_find_matches(arr0, arr0_indices, arr1, arr1_indices,
-                                  dist_func, tol)
+    matches = _naive_find_matches(
+        arr0=arr0,
+        arr0_indices=np.arange(len(arr0)),
+        arr1=arr1,
+        arr1_indices=np.arange(len(arr1)),
+        dist_func=_get_dist_func(dist),
+        tol=tol,
+    )
     return np.array(matches, dtype=np.int64)
 
 
-def find_matches(arr0: np.ndarray, arr1: np.ndarray, dist: DistFuncArg = NORM,
-                 tol: float = 0.1, bucket_tol_mult: int = 2) -> np.ndarray:
+def find_matches(
+    arr0: np.ndarray,
+    arr1: np.ndarray,
+    dist: DistFuncArg = NORM,
+    tol: float = 0.1,
+    bucket_tol_mult: int = 2,
+) -> np.ndarray:
     """
     Finds all numerical matches in two 2D ndarrays of shape (n, d) and (m, d)
     that are within tolerance level and returns the indices. Works best for
@@ -241,7 +279,8 @@ def find_matches(arr0: np.ndarray, arr1: np.ndarray, dist: DistFuncArg = NORM,
     array([[0, 1], [0, 2], [1, 0]])
     """
     # Construct ndarrays if pure Python lists are passed in
-    arr0, arr1 = np.array(arr0, copy=False), np.array(arr1, copy=False)
+    arr0 = np.array(arr0, copy=False)
+    arr1 = np.array(arr1, copy=False)
 
     assert len(arr0.shape) == len(arr1.shape) == 2, \
         f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
@@ -263,14 +302,14 @@ def find_matches(arr0: np.ndarray, arr1: np.ndarray, dist: DistFuncArg = NORM,
         return naive_find_matches(arr0, arr1, dist, tol)
 
     dist_func = _get_dist_func(dist)
-    deltas_iter = _make_deltas_iter(d)
+    deltas_iter = list(_make_deltas_iter(d))
     matches = []
     for key, bucket in buckets.items():
         arr0_indices = bucket[0]
         if not arr0_indices:
             continue
 
-        # Collect all indices from arr1 from this + neighbouring buckets
+        # Collect all indices from arr1 from this + neighboring buckets
         arr1_indices = []
         for bucket_key in _bucket_keys_to_check(key, deltas_iter):
             if bucket_key in buckets:
@@ -279,9 +318,14 @@ def find_matches(arr0: np.ndarray, arr1: np.ndarray, dist: DistFuncArg = NORM,
         if not arr1_indices:
             continue
 
-        matches_inner = _naive_find_matches(arr0, arr0_indices,
-                                            arr1, arr1_indices,
-                                            dist_func, tol)
+        matches_inner = _naive_find_matches(
+            arr0=arr0,
+            arr0_indices=arr0_indices,
+            arr1=arr1,
+            arr1_indices=arr1_indices,
+            dist_func=dist_func,
+            tol=tol,
+        )
         matches.extend(matches_inner)
 
     return np.array(matches, dtype=np.int64)

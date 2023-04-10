@@ -19,22 +19,22 @@ You can install `close-numerical-matches` from [PyPI][pypi]:
 $ pip install close-numerical-matches
 ```
 
-The package is supported on Python 3.6 and above and requires Numpy.
+The package is supported on Python 3.7 and above and requires Numpy.
 
 
 ## How to use
 
 Import `find_matches` from `close_numerical_matches` and supply two arrays of shape (n, d) and (m, d) and a given tolerance level. Optionally provide your desired distance metric and a bucket tolerance multiplier. The arguments in more detail:
 
-* `arr0` : `np.ndarray`  
+* `arr0` : `np.ndarray`
     First array to find matches against. Should be of size (n, d).
-* `arr1` : `np.ndarray`  
+* `arr1` : `np.ndarray`
     Second array to find matches against. Should be of size (m, d).
-* `dist` : `{'norm', 'max'}` or `Callable[[np.ndarray], np.ndarray]`, default='norm'  
+* `dist` : `{'norm', 'max'}` or `Callable[[np.ndarray], np.ndarray]`, default='norm'
     Distance metric to calculate distance. `'norm'` and `'max'` are currently supported. If you want some other distance function, you can supply your own function. It should take an (n, d) array as argument and return an (n,) array.
-* `tol` : `float`, default=0.1  
+* `tol` : `float`, default=0.1
     The tolerance where values are considered the similar enough to count as a match. Should be > 0.
-* `bucket_tol_mult` : `int`, default=2  
+* `bucket_tol_mult` : `int`, default=2
     The tolerance multiplier to use for assigning buckets. Can in some instances make algorithm faster to tweak this. Should never be less than 1.
 
 ### Example

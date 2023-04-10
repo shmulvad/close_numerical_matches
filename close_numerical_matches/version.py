@@ -1,2 +1,3 @@
-# Don't update version here! Update version in setup.py
-__version__ = 'unknown'
+from __future__ import annotations
+
+__version__ = '0.1.1'
