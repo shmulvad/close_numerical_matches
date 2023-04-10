@@ -1,0 +1,62 @@
+name: Upload Python Package
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  mac-and-windows-and-linux-publish:
+    runs-on: ${{ matrix.builds.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        builds: [
+          {os: "macOS-latest", python_requires: ">=3.8.0", archs: "auto"},
+          {os: "ubuntu-latest", python_requires: ">=3.8.0", archs: "auto64"}
+          {os: "windows-latest", python_requires: ">=3.8.0", archs: "auto"},
+        ]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.builds.python_requires }}
+    - name: Install deps
+      run: python -m pip install cibuildwheel==2.11.1 twine==4.0.1  numpy
+    - name: Build wheels
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
+      env:
+        CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.builds.python_requires }}
+        CIBW_BUILD: "cp3*"
+        CIBW_ARCHS:  ${{ matrix.builds.archs }}
+      run: python -m cibuildwheel --output-dir wheelhouse
+    - name: Publish
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        twine upload --skip-existing wheelhouse/*
+  pure-python-wheel-publish:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.11
+    - name: Install deps
+      run: python -m pip install wheel==0.37.1 twine==4.0.1 numpy
+    - name: Build pure python wheel
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
+      env:
+        SS_SKIP_COMPILE: "1"
+      run: pip wheel -w wheelhouse .
+    - name: Publish
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        twine upload --skip-existing wheelhouse/*

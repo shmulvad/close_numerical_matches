@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools", "wheel", "mypy", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "close_numerical_matches"
+description = "Finds close numerical matches across two arrays."
+readme = "README.md"
+authors = [{ name = "Soeren Mulvad", email = "post@kaasogmulvad.dk" }]
+license = { file = "LICENSE" }
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.7",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+dependencies = []
+requires-python = ">=3.7"
+dynamic = ["version"]
+
+[tool.setuptools]
+packages = ["close_numerical_matches"]
+
+[project.urls]
+Documentation = "https://github.com/shmulvad/close_numerical_matches/"
+Changelog = "https://github.com/shmulvad/close_numerical_matches/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/shmulvad/close_numerical_matches/"
+Github = "https://github.com/shmulvad/close_numerical_matches"
+Source = "https://github.com/shmulvad/close_numerical_matches"
+Issues = "https://github.com/shmulvad/close_numerical_matches/issues"
+
+[tool.ruff]
+exclude = [
+    ".git",
+    "*.pyc",
+    "__pycache__",
+]
+ignore = ["S101", "ANN101", "B904"]
+line-length = 127
+# See https://beta.ruff.rs/docs/rules/ for more information
+select = [
+    "C9",
+    "E",
+    "F",
+    "W",
+    "B",
+    "I",
+    "N",
+    "UP",
+    # "ANN",
+    "A",
+    "S",
+    "COM",
+    "C4",
+    "ICN",
+    "PIE",
+    "Q",
+    # "TCH",
+    "PTH",
+    "NPY",
+    "RUF",
+]
+ignore-init-module-imports = true
+target-version = "py37"
+
+[tool.ruff.flake8-quotes]
+docstring-quotes = "double"
+inline-quotes = "single"
+multiline-quotes = "single"
+
+[tool.ruff.isort]
+force-single-line = true
+required-imports = ["from __future__ import annotations"]
