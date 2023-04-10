@@ -13,8 +13,8 @@ jobs:
       matrix:
         builds: [
           {os: "macOS-latest", python_requires: ">=3.8.0", archs: "auto"},
-          {os: "ubuntu-latest", python_requires: ">=3.8.0", archs: "auto64"}
-          {os: "windows-latest", python_requires: ">=3.8.0", archs: "auto"},
+          {os: "ubuntu-latest", python_requires: ">=3.8.0", archs: "auto64"},
+          {os: "windows-latest", python_requires: ">=3.8.0", archs: "auto"}
         ]
     steps:
     - uses: actions/checkout@v2
