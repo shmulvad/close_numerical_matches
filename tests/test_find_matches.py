@@ -61,8 +61,16 @@ class TestFindMatches:
 
     def test_max(self) -> None:
         arr0 = np.array([[5, 5]])
-        arr1 = np.array([[4, 4], [6, 6]])
+        arr1 = np.array([[4, 4], [6, 6], [5, 6.1]])
         matches = find_matches(arr0, arr1, tol=1.000001, dist='max')
+        assert is_same(matches, [[0, 0], [0, 1]])
+
+    def test_cosine(self) -> None:
+        arr0 = np.array([[0, 1]])
+        arr1 = np.array([[0, 5], [5, 0], [0, -5]])
+        matches = find_matches(arr0, arr1, tol=0.1, dist='cos')
+        assert is_same(matches, [[0, 0]])
+        matches = find_matches(arr0, arr1, tol=1.01, dist='cos')
         assert is_same(matches, [[0, 0], [0, 1]])
 
     def test_no_matches(self) -> None:
@@ -70,8 +78,8 @@ class TestFindMatches:
         assert matches.shape == (0,)
 
     def test_custom_dist(self) -> None:
-        def manhatten_dist(arr: np.ndarray) -> np.ndarray:
-            return np.sum(np.abs(arr), axis=1)
+        def manhatten_dist(arr: np.ndarray, row: np.ndarray) -> np.ndarray:
+            return np.sum(np.abs(arr - row), axis=1)
 
         arr0 = np.array([[3, 3, 3]])
         arr1 = np.array([[3, 4, 4], [4, 4, 4]])
@@ -79,7 +87,7 @@ class TestFindMatches:
         assert is_same(matches, [[0, 0]])
 
     def test_value_error_on_incorrect_dist_func(self) -> None:
-        def my_incorrect_dist_func(_) -> int:
+        def my_incorrect_dist_func(*_) -> int:
             return 1
 
         arr0 = np.ones((5, 4))

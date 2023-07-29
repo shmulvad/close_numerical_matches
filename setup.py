@@ -26,7 +26,7 @@ DESCRIPTION = 'Finds close numerical matches across two arrays'
 URL = 'https://github.com/shmulvad/close_numerical_matches'
 EMAIL = 'shmulvad@gmail.com'
 AUTHOR = 'Soeren Mulvad'
-REQUIRES_PYTHON = '>=3.7.0'
+REQUIRES_PYTHON = '>=3.8.0'
 REQUIRED = ['numpy', 'mypy']
 VERSION = load_version()
 
@@ -61,11 +61,9 @@ setup(
     license='MIT',
     **extra_kwargs,
     classifiers=[
-        # Full list: https://pypi.python.org/pypi?%3Aaction=list_classifiers
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',

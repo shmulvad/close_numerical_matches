@@ -7,35 +7,59 @@ from typing import Union
 
 import numpy as np
 
-DistFunc = Callable[[np.ndarray], np.ndarray]
+DistFunc = Callable[[np.ndarray, np.ndarray], np.ndarray]
 DistFuncArg = Union[str, DistFunc]
+NORM, MAX, COS = 'norm', 'max', 'cos'
 
 OVERHEAD_MULT = 5
-NORM, MAX = 'norm', 'max'
-
 DELTAS_1D = [-1, 0, 1]
+
+
+def _normalize_vectors(arr: np.ndarray) -> np.ndarray:
+    """
+    Takes an array and returns a copy of it where each row has been
+    normalized to unit norm
+    """
+    return arr / np.linalg.norm(arr, axis=1).reshape(-1, 1)
+
+
+def _norm(arr: np.ndarray, row: np.ndarray) -> np.ndarray:
+    return np.linalg.norm(arr - row, axis=1)
+
+
+def _max_abs(arr: np.ndarray, row: np.ndarray) -> np.ndarray:
+    return np.max(np.abs(arr - row), axis=1)
+
+
+def _cosine_dist(arr: np.ndarray, row: np.ndarray) -> np.ndarray:
+    num = arr @ row
+    denom = np.linalg.norm(arr, axis=1) * np.linalg.norm(row)
+    cosine_sim = num / denom
+    # Value is now similarity in [-1, 1] so we want to
+    # convert to distance in [0, 2]
+    return 1.0 - cosine_sim
+
+
+DIST_FUNCS: dict[str, DistFunc] = {
+    NORM: _norm,
+    MAX: _max_abs,
+    COS: _cosine_dist,
+}
 
 
 def _get_dist_func(dist_metric: DistFuncArg) -> DistFunc:
     """Returns the appropriate distance function for a given dist_metric"""
     if isinstance(dist_metric, str):
-        if dist_metric == NORM:
-            def norm(arr: np.ndarray) -> np.ndarray:
-                return np.linalg.norm(arr, axis=1)
-            return norm
-
-        if dist_metric == MAX:
-            def max_abs(arr: np.ndarray) -> np.ndarray:
-                return np.max(np.abs(arr), axis=1)
-            return max_abs
+        if dist_metric in DIST_FUNCS:
+            return DIST_FUNCS[dist_metric]
 
         raise ValueError(
-            f'If dist_metric is a string, it has to be {NORM}'
-            + f' or {MAX} but got {dist_metric}',
+            'If dist_metric is a string, it has to be one of '
+            + f'{list(DIST_FUNCS.keys())} but got "{dist_metric}"',
         )
 
     if callable(dist_metric):
-        test_res = dist_metric(np.array([[1, 1]]))
+        test_res = dist_metric(np.array([[1]]), np.array([1]))
         is_valid = (
             isinstance(test_res, np.ndarray)
             and len(test_res.shape) == 1
@@ -87,7 +111,7 @@ def _naive_find_matches(
     for arr0_idx in arr0_indices:
         arr0_idx = int(arr0_idx)
         row = arr0[arr0_idx]
-        inner_diff = dist_func(arr1_filtered - row)
+        inner_diff = dist_func(arr1_filtered, row)
         inner_matches_idx = np.where(inner_diff <= tol)[0]
         new_matches: list[list[int]] = [[arr0_idx, int(arr1_indices[i])] for i in inner_matches_idx]
         matches.extend(new_matches)
@@ -125,7 +149,7 @@ def _assign_to_buckets(
 def _make_deltas_iter(dim: int) -> Generator[tuple[int, ...], None, None]:
     """
     Constructs the delta values to use together with the base element for a
-    given dimension to visit all neighbours and the base element itself
+    given dimension to visit all neighbors and the base element itself
 
     Examples
     --------
@@ -177,11 +201,11 @@ def naive_find_matches(
     arr1 : np.ndarray
         Second array to find matches against. Should be of size (m, d).
 
-    dist : {'norm', 'max'} or Callable[[np.ndarray], np.ndarray]
-        Distance metric to calculate distance. `'norm'` and `'max'` are
+    dist : {'norm', 'max', 'cos'} or Callable[[np.ndarray, np.ndarray], np.ndarray]
+        Distance metric to calculate distance. `'norm'`, `'max'` and `'cos'` are
         currently supported. If you want some other distance function, you can
-        supply your own function. It should take an (n, d) array as argument
-        and return an (n,) array.
+        supply your own function. It should take an (n, d) array and (d,) array
+        as argument and return an (n,) array.
 
     tol : float, default=0.1
         The tolerance where values are considered the similar enough to count
@@ -216,6 +240,9 @@ def naive_find_matches(
 
     assert tol > 0, f'Tolerance has to be strictly positive but got {tol}'
 
+    if dist == COS:
+        arr0, arr1 = _normalize_vectors(arr0), _normalize_vectors(arr1)
+
     matches = _naive_find_matches(
         arr0=arr0,
         arr0_indices=np.arange(len(arr0)),
@@ -232,7 +259,7 @@ def find_matches(
     arr1: np.ndarray,
     dist: DistFuncArg = NORM,
     tol: float = 0.1,
-    bucket_tol_mult: int = 2,
+    bucket_tol_mult: float = 2.0,
 ) -> np.ndarray:
     """
     Finds all numerical matches in two 2D ndarrays of shape (n, d) and (m, d)
@@ -247,19 +274,20 @@ def find_matches(
     arr1 : np.ndarray
         Second array to find matches against. Should be of size (m, d).
 
-    dist : {'norm', 'max'} or Callable[[np.ndarray], np.ndarray]
-        Distance metric to calculate distance. `'norm'` and `'max'` are
+    dist : {'norm', 'max', 'cos'} or Callable[[np.ndarray, np.ndarray], np.ndarray]
+        Distance metric to calculate distance. `'norm'`, `'max'` and `'cos'` are
         currently supported. If you want some other distance function, you can
-        supply your own function. It should take an (n, d) array as argument
-        and return an (n,) array.
+        supply your own function. It should take an (n, d) array and (d,) array
+        as argument and return an (n,) array.
 
     tol : float, default=0.1
         The tolerance where values are considered the similar enough to count
         as a match. Should be > 0.
 
-    bucket_tol_mult : int, default=2
+    bucket_tol_mult : float, default=2.0
         The tolerance multiplier to use for assigning buckets. Can in some
-        instances make algorithm faster to tweak this. Should never be less
+        instances make algorithm faster to tweak this. For cosine distance,
+        you likely want to set this much higher. Should never be less
         than 1.
 
     Returns
@@ -292,6 +320,9 @@ def find_matches(
     assert tol > 0, f'Tolerance has to be strictly positive but got {tol}'
     assert bucket_tol_mult >= 1.0, \
         f'bucket_tol_mult should be >= 1 but got {bucket_tol_mult}'
+
+    if dist == COS:
+        arr0, arr1 = _normalize_vectors(arr0), _normalize_vectors(arr1)
 
     buckets = _assign_to_buckets(arr0, arr1, bucket_tol_mult * tol)
 
