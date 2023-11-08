@@ -7,29 +7,27 @@ on:
 
 jobs:
   mac-and-windows-and-linux-publish:
-    runs-on: ${{ matrix.builds.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        builds: [
-          {os: "macOS-latest", python_requires: ">=3.8.0", archs: "auto"},
-          {os: "ubuntu-latest", python_requires: ">=3.8.0", archs: "auto64"},
-          {os: "windows-latest", python_requires: ">=3.8.0", archs: "auto"}
-        ]
+        os: [macOS-latest, ubuntu-latest, windows-latest]
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
       with:
-        python-version: 3.11
+        python-version: 3.12
     - name: Install deps
-      run: python -m pip install cibuildwheel==2.11.1 twine==4.0.1 numpy
+      run: python -m pip install cibuildwheel==2.16.2 twine==4.0.2 numpy
     - name: Build wheels
       if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
       env:
-        CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.builds.python_requires }}
+        CIBW_PROJECT_REQUIRES_PYTHON: ">=3.8.0"
         CIBW_BUILD: "cp3*"
-        CIBW_ARCHS:  ${{ matrix.builds.archs }}
+        CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
+        CIBW_ARCHS_LINUX: "auto aarch64"
+        CIBW_ARCHS_WINDOWS: "x86 AMD64 ARM64"
       run: python -m cibuildwheel --output-dir wheelhouse
     - name: Publish
       if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
@@ -41,13 +39,13 @@ jobs:
   pure-python-wheel-publish:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
       with:
-        python-version: 3.11
+        python-version: 3.12
     - name: Install deps
-      run: python -m pip install wheel==0.37.1 twine==4.0.1 numpy
+      run: python -m pip install wheel==0.41.3 twine==4.0.2 numpy
     - name: Build pure python wheel
       if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
       env:

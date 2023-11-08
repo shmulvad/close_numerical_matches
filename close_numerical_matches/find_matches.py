@@ -54,17 +54,12 @@ def _get_dist_func(dist_metric: DistFuncArg) -> DistFunc:
             return DIST_FUNCS[dist_metric]
 
         raise ValueError(
-            'If dist_metric is a string, it has to be one of '
-            + f'{list(DIST_FUNCS.keys())} but got "{dist_metric}"',
+            'If dist_metric is a string, it has to be one of ' + f'{list(DIST_FUNCS.keys())} but got "{dist_metric}"',
         )
 
     if callable(dist_metric):
         test_res = dist_metric(np.array([[1]]), np.array([1]))
-        is_valid = (
-            isinstance(test_res, np.ndarray)
-            and len(test_res.shape) == 1
-            and len(test_res) == 1
-        )
+        is_valid = isinstance(test_res, np.ndarray) and len(test_res.shape) == 1 and len(test_res) == 1
         if is_valid:
             return dist_metric
 
@@ -103,8 +98,7 @@ def _naive_find_matches(
     reverse = False
     if len(arr0_indices) > len(arr1_indices):
         reverse = True
-        arr0, arr0_indices, arr1, arr1_indices \
-            = arr1, arr1_indices, arr0, arr0_indices
+        arr0, arr0_indices, arr1, arr1_indices = arr1, arr1_indices, arr0, arr0_indices
 
     matches: list[list[int]] = []
     arr1_filtered = arr1[arr1_indices]
@@ -177,10 +171,7 @@ def _bucket_keys_to_check(
     >>> _bucket_keys_to_check((5, 7), _make_deltas_iter(2))
     [(4, 6), (4, 7), (4, 8), (5, 6), (5, 7), (5, 8), (6, 6), (6, 7), (6, 8)]
     """
-    return [
-        tuple(key_elm + delta for key_elm, delta in zip(key, deltas))
-        for deltas in deltas_iter
-    ]
+    return [tuple(key_elm + delta for key_elm, delta in zip(key, deltas)) for deltas in deltas_iter]
 
 
 def naive_find_matches(
@@ -231,12 +222,11 @@ def naive_find_matches(
     arr0 = np.array(arr0, copy=False)
     arr1 = np.array(arr1, copy=False)
 
-    assert len(arr0.shape) == len(arr1.shape) == 2, \
-        f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
+    assert len(arr0.shape) == len(arr1.shape) == 2, f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
 
-    assert arr0.shape[1] == arr1.shape[1], \
-        ('Arrays should be of equivalent size in the second axis, but got'
-         + f' {arr0.shape[1]} and {arr1.shape[1]}')
+    assert arr0.shape[1] == arr1.shape[1], (
+        'Arrays should be of equivalent size in the second axis, but got' + f' {arr0.shape[1]} and {arr1.shape[1]}'
+    )
 
     assert tol > 0, f'Tolerance has to be strictly positive but got {tol}'
 
@@ -310,16 +300,14 @@ def find_matches(
     arr0 = np.array(arr0, copy=False)
     arr1 = np.array(arr1, copy=False)
 
-    assert len(arr0.shape) == len(arr1.shape) == 2, \
-        f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
+    assert len(arr0.shape) == len(arr1.shape) == 2, f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
 
-    assert arr0.shape[1] == arr1.shape[1], \
-        ('Arrays should be of equivalent size in the second axis, but got'
-         + f' {arr0.shape[1]} and {arr1.shape[1]}')
+    assert arr0.shape[1] == arr1.shape[1], (
+        'Arrays should be of equivalent size in the second axis, but got' + f' {arr0.shape[1]} and {arr1.shape[1]}'
+    )
 
     assert tol > 0, f'Tolerance has to be strictly positive but got {tol}'
-    assert bucket_tol_mult >= 1.0, \
-        f'bucket_tol_mult should be >= 1 but got {bucket_tol_mult}'
+    assert bucket_tol_mult >= 1.0, f'bucket_tol_mult should be >= 1 but got {bucket_tol_mult}'
 
     if dist == COS:
         arr0, arr1 = _normalize_vectors(arr0), _normalize_vectors(arr1)

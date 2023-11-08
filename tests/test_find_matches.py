@@ -12,40 +12,45 @@ def is_same(matches0, matches1) -> bool:
     """
     matches0_set = set(map(tuple, matches0))
     matches1_set = set(map(tuple, matches1))
-    return (
-        matches0_set == matches1_set
-        and len(matches0_set) == len(matches0) == len(matches1)
-    )
+    return matches0_set == matches1_set and len(matches0_set) == len(matches0) == len(matches1)
 
 
 class TestFindMatches:
     def test_small(self) -> None:
-        arr0 = np.array([
-            [5.50000001, 4.50000001],
-            [5.73212317, 8.73212317],
-            [8.23410901, 9.26367166],
-        ])
-        arr1 = np.array([
-            [5.50000002, 4.50000002],    # norm is too big for arr0[0]
-            [5.73212317, 8.73212317],    # norm is within for arr[1]
-            [5.500000015, 4.500000005],  # norm is within arr[0]
-            [5.73212317, 8.732123182],    # norm is too big for arr[1]
-        ])
+        arr0 = np.array(
+            [
+                [5.50000001, 4.50000001],
+                [5.73212317, 8.73212317],
+                [8.23410901, 9.26367166],
+            ]
+        )
+        arr1 = np.array(
+            [
+                [5.50000002, 4.50000002],  # norm is too big for arr0[0]
+                [5.73212317, 8.73212317],  # norm is within for arr[1]
+                [5.500000015, 4.500000005],  # norm is within arr[0]
+                [5.73212317, 8.732123182],  # norm is too big for arr[1]
+            ]
+        )
         matches = find_matches(arr0, arr1, tol=0.00000001)
         assert is_same(matches, [[0, 2], [1, 1]])
 
     def test_big(self) -> None:
-        arr0 = np.array([
-            [550000001, 450000001],
-            [573212317, 873212317],
-            [823410901, 926367166],
-        ])
-        arr1 = np.array([
-            [550000002, 450000002],  # norm is too big for arr0[0]
-            [573212317, 873212317],  # norm is within for arr[1]
-            [550000001, 450000000],  # norm is within arr[0]
-            [573212317, 873212318],   # norm is too big for arr[1]
-        ])
+        arr0 = np.array(
+            [
+                [550000001, 450000001],
+                [573212317, 873212317],
+                [823410901, 926367166],
+            ]
+        )
+        arr1 = np.array(
+            [
+                [550000002, 450000002],  # norm is too big for arr0[0]
+                [573212317, 873212317],  # norm is within for arr[1]
+                [550000001, 450000000],  # norm is within arr[0]
+                [573212317, 873212318],  # norm is too big for arr[1]
+            ]
+        )
         matches = find_matches(arr0, arr1, tol=1)
         assert is_same(matches, [[0, 2], [1, 1], [1, 3]])
 
@@ -54,8 +59,12 @@ class TestFindMatches:
         arr1 = np.array([[7, 7], [8, 8], [9, 9]])
         matches = find_matches(arr0, arr1, tol=999)
         expected = [
-            [0, 0], [0, 1], [0, 2],
-            [1, 0], [1, 1], [1, 2],
+            [0, 0],
+            [0, 1],
+            [0, 2],
+            [1, 0],
+            [1, 1],
+            [1, 2],
         ]
         assert is_same(matches, expected)
 

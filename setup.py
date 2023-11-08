@@ -7,7 +7,7 @@ import re
 from setuptools import find_packages
 from setuptools import setup
 
-BASE_DIR = pathlib.Path(os.path.realpath(__file__)).parent
+BASE_DIR = pathlib.Path(__file__).resolve().parent
 
 
 def load_version() -> str:
@@ -38,11 +38,14 @@ COMPILE = not SKIP_COMPILE
 extra_kwargs = {}
 if COMPILE:
     from mypyc.build import mypycify
+
     extra_kwargs = {
-        'ext_modules': mypycify([
-            '--disallow-untyped-defs',
-            'close_numerical_matches/find_matches.py',
-        ]),
+        'ext_modules': mypycify(
+            [
+                '--disallow-untyped-defs',
+                'close_numerical_matches/find_matches.py',
+            ]
+        ),
     }
 
 setup(
@@ -68,6 +71,7 @@ setup(
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
         'Topic :: Scientific/Engineering',
         'Typing :: Typed',
     ],
