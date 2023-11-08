@@ -7,6 +7,7 @@ on:
 
 jobs:
   mac-and-windows-and-linux-publish:
+    name: Wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -26,7 +27,7 @@ jobs:
         CIBW_PROJECT_REQUIRES_PYTHON: ">=3.8.0"
         CIBW_BUILD: "cp3*"
         CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
-        CIBW_ARCHS_LINUX: "auto aarch64"
+        CIBW_ARCHS_LINUX: "x86_64 aarch64"
         CIBW_ARCHS_WINDOWS: "x86 AMD64 ARM64"
       run: python -m cibuildwheel --output-dir wheelhouse
     - name: Publish
@@ -34,9 +35,9 @@ jobs:
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: |
-        twine upload --skip-existing wheelhouse/*
+      run: twine upload --skip-existing wheelhouse/*
   pure-python-wheel-publish:
+    name: Pure Python Wheels
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -56,5 +57,4 @@ jobs:
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: |
-        twine upload --skip-existing wheelhouse/*
+      run: twine upload --skip-existing wheelhouse/*
