@@ -36,8 +36,8 @@ jobs:
       - name: Set up Python
         run: uv python install
       # Only the tools from uv.lock: type checking uses the `.pyi` stubs, so the
-      # extension does not need to be built.
-      - run: uv sync --locked --no-install-project
+      # extension does not need to be built. The bench group gives pyright scipy.
+      - run: uv sync --locked --no-install-project --group bench
       - name: Lint
         run: uv run --no-sync ruff check --output-format=github .
       - name: Format
