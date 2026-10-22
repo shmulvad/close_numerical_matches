@@ -111,7 +111,7 @@ dtype('float32')
 
 ### Threads and free-threaded Python
 
-The search does not hold the GIL, so other Python threads keep running, and with `n_threads` it runs on several cores itself. The inputs are copied before the GIL is released, so other threads may change them during a search. On free-threaded Python (3.14t, 3.15t) the module does not re-enable the GIL, and `find_matches` and `MatchIndex.query` can be called from many threads at once. As with any numpy function, do not write to an input array from another thread while a call is reading it.
+The search does not hold the GIL, so other Python threads keep running, and with `n_threads` it runs on several cores itself, on a thread pool shared by all calls. The inputs are copied before the GIL is released, so other threads may change them during a search. On free-threaded Python (3.14t, 3.15t) the module does not re-enable the GIL, and `find_matches` and `MatchIndex.query` can be called from many threads at once. As with any numpy function, do not write to an input array from another thread while a call is reading it.
 
 ## How fast is it?
 
@@ -119,24 +119,26 @@ Benchmarked on an Apple M5 Pro (18 cores) with Python 3.15, with SciPy's `KDTree
 
 | Scenario | Matches | 1 thread | All cores | SciPy KDTree |
 |---|---:|---:|---:|---:|
-| 2-D: 320k x 44k | 44,453 | 35.5 ms | 6.1 ms | 66.9 ms |
-| 1-D: 1M x 1M | 199,474 | 188.1 ms | 37.0 ms | 261.4 ms |
-| 3-D: 200k x 200k | 4,416 | 46.3 ms | 9.2 ms | 109.5 ms |
-| 3-D chebyshev: 200k x 200k | 2,580 | 42.7 ms | 9.0 ms | 111.8 ms |
-| 8-D clustered: 50k x 50k | 47,588 | 17.1 ms | 4.4 ms | 148.9 ms |
-| 32-D cosine, clustered: 20k x 20k | 666,344 | 45.3 ms | 10.2 ms | 1.46 s |
-| Many matches: 3k x 3k, 2-D | 1,928,484 | 10.5 ms | 5.6 ms | 9.4 ms |
-| Tiny: 100 x 100, 2-D | 59 | 8 µs | 8 µs | 21 µs |
+| 2-D: 320k x 44k | 44,453 | 20.8 ms | 3.8 ms | 66.7 ms |
+| 1-D: 1M x 1M | 199,474 | 35.3 ms | 17.5 ms | 260.1 ms |
+| 3-D: 200k x 200k | 4,416 | 27.6 ms | 6.0 ms | 109.5 ms |
+| 3-D chebyshev: 200k x 200k | 2,580 | 24.7 ms | 5.8 ms | 111.9 ms |
+| 8-D clustered: 50k x 50k | 47,588 | 12.3 ms | 3.1 ms | 149.9 ms |
+| 32-D cosine, clustered: 20k x 20k | 666,344 | 40.8 ms | 8.7 ms | 1.46 s |
+| Many matches: 3k x 3k, 2-D | 1,928,484 | 11.0 ms | 5.8 ms | 9.4 ms |
+| Tiny: 100 x 100, 2-D | 59 | 7 µs | 7 µs | 21 µs |
 
 ## How it works
 
-A KD-tree is built over the smaller of the two arrays: the points are split recursively at the median of their widest dimension, and every node stores the bounding box of its points. Each row of the other array then walks the tree and skips every node whose box is further away than `tol`. If a whole box lies within `tol`, all its points match without computing distances. Otherwise only the points in the leaves that are left are compared.
+A KD-tree is built over the smaller of the two arrays: the points are split recursively at the median of their widest dimension, and every node stores the bounding box of its points. Each row of the other array then walks down to its own leaf by the split values alone. At every level the other side is checked with a one-dimensional bound and only searched, box by box, when it can hold a match, so most of the tree is never touched. If a whole box lies within `tol`, all its points match without computing distances. Otherwise only the points in the leaves that are left are compared.
+
+In one dimension no tree is needed: both arrays are sorted and swept together in one pass.
 
 Some details that make it fast:
 
 * Every metric is compiled into its own specialised search loop. Euclidean-like metrics compare squared distances while pruning, and cosine searches on unit vectors (where the cosine distance is half the squared Euclidean distance), so it is exact too.
 * The queries are processed in tree order, so consecutive queries visit the same nodes while those are in the CPU cache.
-* With `n_threads`, the tree is built and the queries are searched in parallel, and the result is still the same, sorted array.
+* With `n_threads`, the tree is built and the queries are searched in parallel on a thread pool that all calls share, and the result is still the same, sorted array.
 
 For low dimensions the runtime is close to O((n + m) log(min(n, m)) + k) for k matches. In high dimensions or with very many matches no search structure can avoid comparing most pairs, but the tree never costs much more than comparing all pairs, which `naive_find_matches` does.
 

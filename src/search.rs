@@ -1,12 +1,14 @@
 //! Finding all close pairs: picks the searcher, runs the queries (in parallel if
 //! asked) and assembles the sorted output.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::kdtree::{Brute, KdTree, Searcher};
 use crate::metric::{Distance, Metric};
 use crate::points::Points;
 use crate::scalar::Scalar;
+use crate::sweep::find_matches_1d;
 use crate::with_kernel;
 
 /// Below this many queries per thread, starting threads costs more than it saves.
@@ -33,7 +35,7 @@ impl<T> Default for Matches<T> {
 
 impl<T> Matches<T> {
     #[inline(always)]
-    fn push(&mut self, i: i64, j: usize, dist: T, want_dist: bool) {
+    pub(crate) fn push(&mut self, i: i64, j: usize, dist: T, want_dist: bool) {
         self.pairs.extend_from_slice(&[i, j as i64]);
         if want_dist {
             self.dists.push(dist);
@@ -52,42 +54,43 @@ impl<T> Matches<T> {
 /// The number of threads to use for `requested` (0 means one per CPU core).
 pub fn resolve_threads(requested: usize) -> usize {
     if requested == 0 {
-        std::thread::available_parallelism().map_or(1, |n| n.get())
+        rayon::current_num_threads()
     } else {
         requested
     }
 }
 
-/// Runs `f(chunk)` for every chunk in `0..n_chunks` on up to `n_threads` threads and
-/// returns the results in chunk order.
-fn par_map<R: Send>(n_chunks: usize, n_threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+/// Runs `f(chunk)` for every chunk in `0..n_chunks` on up to `n_threads` threads of
+/// the shared thread pool and returns the results in chunk order.
+pub(crate) fn par_map<R: Send>(
+    n_chunks: usize,
+    n_threads: usize,
+    f: impl Fn(usize) -> R + Sync,
+) -> Vec<R> {
     if n_threads <= 1 || n_chunks <= 1 {
         return (0..n_chunks).map(f).collect();
     }
     let next = AtomicUsize::new(0);
-    let mut slots: Vec<Option<R>> = (0..n_chunks).map(|_| None).collect();
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..n_threads.min(n_chunks))
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done = Vec::new();
-                    loop {
-                        let chunk = next.fetch_add(1, Ordering::Relaxed);
-                        if chunk >= n_chunks {
-                            return done;
-                        }
-                        done.push((chunk, f(chunk)));
+    let done: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(n_chunks));
+    rayon::scope(|scope| {
+        for _ in 0..n_threads.min(n_chunks) {
+            scope.spawn(|_| {
+                let mut mine = Vec::new();
+                loop {
+                    let chunk = next.fetch_add(1, Ordering::Relaxed);
+                    if chunk >= n_chunks {
+                        break;
                     }
-                })
-            })
-            .collect();
-        for worker in workers {
-            let done = worker.join().expect("search thread panicked");
-            for (chunk, result) in done {
-                slots[chunk] = Some(result);
-            }
+                    mine.push((chunk, f(chunk)));
+                }
+                done.lock().expect("search thread panicked").extend(mine);
+            });
         }
     });
+    let mut slots: Vec<Option<R>> = (0..n_chunks).map(|_| None).collect();
+    for (chunk, result) in done.into_inner().expect("search thread panicked") {
+        slots[chunk] = Some(result);
+    }
     slots
         .into_iter()
         .map(|r| r.expect("every chunk is processed"))
@@ -95,7 +98,7 @@ fn par_map<R: Send>(n_chunks: usize, n_threads: usize, f: impl Fn(usize) -> R + 
 }
 
 /// Splits `n` queries into chunks for `n_threads` threads.
-fn chunking(n: usize, n_threads: usize) -> (usize, usize) {
+pub(crate) fn chunking(n: usize, n_threads: usize) -> (usize, usize) {
     let n_threads = n_threads.min(n / MIN_QUERIES_PER_THREAD).max(1);
     if n_threads == 1 {
         return (1, n_threads);
@@ -105,7 +108,7 @@ fn chunking(n: usize, n_threads: usize) -> (usize, usize) {
 }
 
 /// The query range of chunk `c` out of `n_chunks` for `n` queries.
-fn chunk_range(c: usize, n_chunks: usize, n: usize) -> std::ops::Range<usize> {
+pub(crate) fn chunk_range(c: usize, n_chunks: usize, n: usize) -> std::ops::Range<usize> {
     let size = n.div_ceil(n_chunks.max(1));
     (c * size).min(n)..((c + 1) * size).min(n)
 }
@@ -128,9 +131,10 @@ fn query_order<T: Scalar, S: Searcher<T>>(
     }
     let (n_chunks, n_threads) = chunking(n, n_threads);
     let keys: Vec<Vec<usize>> = par_map(n_chunks, n_threads, |c| {
-        chunk_range(c, n_chunks, n)
-            .map(|qi| searcher.locality_key(queries.row(qi)))
-            .collect()
+        let range = chunk_range(c, n_chunks, n);
+        let mut keys = vec![0usize; range.len()];
+        searcher.locality_keys(queries, range.start, &mut keys);
+        keys
     });
     let mut starts = vec![0usize; n_keys + 1];
     for &key in keys.iter().flatten() {
@@ -212,7 +216,7 @@ fn concat<T: Scalar>(mut parts: Vec<Matches<T>>) -> Matches<T> {
 
 /// Stable counting sort of the pairs of all parts by column `col` (values in
 /// `0..n_keys`). With `swap`, the two columns of every pair are swapped in the output.
-fn counting_sort<T: Scalar>(
+pub(crate) fn counting_sort<T: Scalar>(
     parts: &[Matches<T>],
     col: usize,
     n_keys: usize,
@@ -254,7 +258,7 @@ fn counting_sort<T: Scalar>(
 }
 
 /// Searches every query and returns pairs `(query row, stored row)`, sorted.
-fn query_rows<T: Scalar, S: Searcher<T>, M: Distance<T>>(
+pub(crate) fn query_rows<T: Scalar, S: Searcher<T>, M: Distance<T>>(
     searcher: &S,
     m: &M,
     queries: &Points<T>,
@@ -369,8 +373,9 @@ impl<T: Scalar> Index<T> {
 /// each other, sorted lexicographically. The points must have the same number of
 /// dimensions and be normalised if the metric needs it ([`Metric::normalizes`]).
 ///
-/// The tree is built over the smaller set and searched with the larger one. With
-/// `naive`, every pair is compared instead (for testing and reference).
+/// The tree is built over the smaller set and searched with the larger one; in one
+/// dimension both sets are sorted and swept instead. With `naive`, every pair is
+/// compared (for testing and reference).
 pub fn find_matches<T: Scalar>(
     p0: Points<T>,
     p1: Points<T>,
@@ -388,6 +393,8 @@ pub fn find_matches<T: Scalar>(
     with_kernel!(metric.kernel(), tol, m => {
         if naive {
             query_rows(&Brute { points: &p1 }, &m, &p0, tol, n_threads, want_dist)
+        } else if p0.dims() == 1 {
+            find_matches_1d(&p0, &p1, &m, tol, n_threads, want_dist)
         } else if p0.len() <= p1.len() {
             let tree = KdTree::build(p0, n_threads);
             query_rows_transposed(&tree, &m, &p1, n0, tol, n_threads, want_dist)

@@ -20,6 +20,16 @@ impl<T: Scalar> Points<T> {
     /// With `normalize`, every row is scaled to unit Euclidean length.
     pub fn new(values: &[T], n: usize, d: usize, normalize: bool) -> Self {
         assert_eq!(values.len(), n * d, "values must have n * d elements");
+        if !normalize && values.iter().all(|v| v.is_finite()) {
+            // The common case: nothing to skip, so copy in bulk.
+            return Self {
+                data: values.to_vec(),
+                orig: None,
+                len: n,
+                d,
+                n_input: n,
+            };
+        }
         let mut data = Vec::with_capacity(values.len());
         // Only allocated once a row is left out.
         let mut orig: Option<Vec<usize>> = None;

@@ -8,6 +8,7 @@ pub mod metric;
 pub mod points;
 pub mod scalar;
 pub mod search;
+pub mod sweep;
 
 mod py;
 

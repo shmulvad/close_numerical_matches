@@ -13,7 +13,7 @@ The matching engine is rewritten in Rust (with [PyO3](https://pyo3.rs)) and uses
 - `n_threads` to search on several threads. The GIL is released during the search.
 - Native float32 support: float32 inputs are searched in float32.
 - Support for free-threaded Python (3.14t, 3.15t) and Python 3.13 to 3.15.
-- `tol=0` finds exact duplicates; 1-D arrays are treated as a single column.
+- `tol=0` finds exact duplicates; 1-D arrays are treated as a single column, and one-dimensional inputs are matched by sorting and sweeping, which is faster still.
 
 ### Changed
 

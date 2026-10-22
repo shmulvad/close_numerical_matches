@@ -270,7 +270,8 @@ class MatchIndex:
     `query`. `MatchIndex(arr1).query(arr0, tol)` returns the same as
     `find_matches(arr0, arr1, tol=tol)` when both arrays have the same dtype. The
     index always computes in its own dtype: a float32 index converts float64 queries
-    to float32, where `find_matches` would compute in float64.
+    to float32, where `find_matches` would compute in float64. One-dimensional data is
+    searched with the tree too, where `find_matches` sorts and sweeps instead.
 
     The index is immutable, so it can be shared by several threads.
 

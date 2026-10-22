@@ -37,6 +37,13 @@ pub trait Searcher<T: Scalar>: Sync {
     fn locality_key(&self, _q: &[T]) -> usize {
         0
     }
+
+    /// The keys of the queries `start..start + out.len()`.
+    fn locality_keys(&self, queries: &Points<T>, start: usize, out: &mut [usize]) {
+        for (k, key) in out.iter_mut().enumerate() {
+            *key = self.locality_key(queries.row(start + k));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,60 +70,103 @@ pub struct KdTree<T> {
     /// Per node: the smallest value in dimension `dim` of the right child (internal
     /// nodes only).
     splits: Vec<T>,
+    /// Per node: the largest value in dimension `dim` of the left child (internal
+    /// nodes only).
+    lmax: Vec<T>,
 }
 
 /// Subtrees with fewer points than this are built on the current thread.
 const PARALLEL_BUILD_MIN: usize = 32_768;
 
+/// Whether a (sub)tree of `n` points is split on two threads.
+fn split_in_parallel(n: usize, n_threads: usize) -> bool {
+    n_threads > 1 && n >= PARALLEL_BUILD_MIN
+}
+
 /// The nodes of a (sub)tree under construction. Node 0 is its root.
+///
+/// The build is top-down with *loose* boxes: a child's box is its parent's box
+/// clipped at the split value, which costs nothing. The split dimension is chosen
+/// from the loose box. Afterwards every box is tightened bottom-up: leaves from their
+/// points (one pass over all points), internal nodes as the union of their children.
 struct Builder<T> {
     d: usize,
     nodes: Vec<Node>,
     bounds: Vec<T>,
     splits: Vec<T>,
+    lmax: Vec<T>,
 }
 
 impl<T: Scalar> Builder<T> {
     /// Builds the tree over `perm` (point indices, reordered in place), whose first
-    /// element is at position `base` of the whole tree.
+    /// element is at position `base` of the whole tree. `root_box` is the (loose)
+    /// box of the root; without it, the root's box is computed from the points.
     fn build(
         points: &Points<T>,
         perm: &mut [usize],
         base: usize,
         leaf_size: usize,
         n_threads: usize,
+        root_box: Option<&[T]>,
     ) -> Self {
         let mut b = Self {
             d: points.dims(),
             nodes: Vec::with_capacity(2 * perm.len().div_ceil(leaf_size) + 1),
             bounds: Vec::new(),
             splits: Vec::new(),
+            lmax: Vec::new(),
         };
-        b.add_node(points, perm, base);
+        match root_box {
+            Some(bx) => b.add_node(bx, base, perm.len()),
+            None => {
+                let bx = bbox(points, perm);
+                b.add_node(&bx, base, perm.len())
+            }
+        };
         b.split(points, perm, 0, leaf_size, n_threads);
+        if !split_in_parallel(perm.len(), n_threads) {
+            // A parallel split grafts tightened subtrees and unions them itself.
+            b.tighten(points, perm, base);
+        }
         b
     }
 
-    /// Adds a node for the points `perm` (at position `base`) with their bounding box.
-    fn add_node(&mut self, points: &Points<T>, perm: &[usize], base: usize) -> usize {
-        let d = self.d;
-        let at = self.bounds.len();
-        self.bounds.extend_from_slice(points.row(perm[0]));
-        self.bounds.extend_from_slice(points.row(perm[0]));
-        let (lo, hi) = self.bounds[at..].split_at_mut(d);
-        for &i in &perm[1..] {
-            for (k, &v) in points.row(i).iter().enumerate() {
-                lo[k] = lo[k].min(v);
-                hi[k] = hi[k].max(v);
-            }
-        }
+    /// Adds a node for `n` points at position `start` with the box `bx`.
+    fn add_node(&mut self, bx: &[T], start: usize, n: usize) -> usize {
+        self.bounds.extend_from_slice(bx);
         self.nodes.push(Node {
-            start: base,
-            end: base + perm.len(),
+            start,
+            end: start + n,
             left: 0,
             dim: 0,
         });
         self.splits.push(T::ZERO);
+        self.lmax.push(T::ZERO);
+        self.nodes.len() - 1
+    }
+
+    /// The box of node `id`.
+    fn bx(&self, id: usize) -> &[T] {
+        &self.bounds[id * 2 * self.d..(id + 1) * 2 * self.d]
+    }
+
+    /// Adds a child of `parent` whose box is the parent's clipped at `split` in
+    /// `dim`: the upper bound for the left child, the lower bound for the right one.
+    fn add_loose(&mut self, parent: usize, start: usize, n: usize, split: T, left: bool) -> usize {
+        let d = self.d;
+        let dim = self.nodes[parent].dim;
+        let at = self.bounds.len();
+        self.bounds
+            .extend_from_within(parent * 2 * d..(parent + 1) * 2 * d);
+        self.bounds[at + if left { d + dim } else { dim }] = split;
+        self.nodes.push(Node {
+            start,
+            end: start + n,
+            left: 0,
+            dim: 0,
+        });
+        self.splits.push(T::ZERO);
+        self.lmax.push(T::ZERO);
         self.nodes.len() - 1
     }
 
@@ -135,7 +185,7 @@ impl<T: Scalar> Builder<T> {
             return;
         }
         let d = self.d;
-        let (lo, hi) = self.bounds[id * 2 * d..(id + 1) * 2 * d].split_at(d);
+        let (lo, hi) = self.bx(id).split_at(d);
         let mut dim = 0;
         let mut widest = T::ZERO;
         for k in 0..d {
@@ -157,32 +207,75 @@ impl<T: Scalar> Builder<T> {
                 .partial_cmp(&key(b))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        let split = key(perm[mid]);
         self.nodes[id].dim = dim;
-        self.splits[id] = key(perm[mid]);
+        self.splits[id] = split;
         let base = self.nodes[id].start;
         let (left_perm, right_perm) = perm.split_at_mut(mid);
-        if n_threads > 1 && n >= PARALLEL_BUILD_MIN {
+        if split_in_parallel(n, n_threads) {
             let right_threads = n_threads / 2;
-            let (left, right) = std::thread::scope(|scope| {
-                let right = scope.spawn(|| {
-                    Self::build(points, right_perm, base + mid, leaf_size, right_threads)
-                });
-                let left = Self::build(
-                    points,
-                    left_perm,
-                    base,
-                    leaf_size,
-                    n_threads - right_threads,
-                );
-                (left, right.join().expect("tree build thread panicked"))
-            });
+            let mut left_box = self.bx(id).to_vec();
+            let mut right_box = left_box.clone();
+            left_box[d + dim] = split;
+            right_box[dim] = split;
+            let (left, right) = rayon::join(
+                || {
+                    Self::build(
+                        points,
+                        left_perm,
+                        base,
+                        leaf_size,
+                        n_threads - right_threads,
+                        Some(&left_box),
+                    )
+                },
+                || {
+                    Self::build(
+                        points,
+                        right_perm,
+                        base + mid,
+                        leaf_size,
+                        right_threads,
+                        Some(&right_box),
+                    )
+                },
+            );
+            // Both subtrees are tight; this node is their union.
+            for k in 0..d {
+                self.bounds[id * 2 * d + k] = left.bounds[k].min(right.bounds[k]);
+                self.bounds[id * 2 * d + d + k] = left.bounds[d + k].max(right.bounds[d + k]);
+            }
+            self.lmax[id] = left.bounds[d + dim];
             self.graft(id, left, right);
         } else {
-            let left = self.add_node(points, left_perm, base);
-            self.add_node(points, right_perm, base + mid);
+            let left = self.add_loose(id, base, mid, split, true);
+            self.add_loose(id, base + mid, n - mid, split, false);
             self.nodes[id].left = left;
             self.split(points, left_perm, left, leaf_size, 1);
             self.split(points, right_perm, left + 1, leaf_size, 1);
+        }
+    }
+
+    /// Replaces the loose boxes by the bounding boxes of the points: leaves from
+    /// their points, internal nodes as the union of their children. Children always
+    /// come after their parent in `nodes`, so one pass in reverse order suffices.
+    fn tighten(&mut self, points: &Points<T>, perm: &[usize], base: usize) {
+        let d = self.d;
+        for id in (0..self.nodes.len()).rev() {
+            let node = self.nodes[id];
+            if node.left == 0 {
+                let bx = bbox(points, &perm[node.start - base..node.end - base]);
+                self.bounds[id * 2 * d..(id + 1) * 2 * d].copy_from_slice(&bx);
+            } else {
+                let (l, r) = (node.left, node.left + 1);
+                for k in 0..d {
+                    let lo = self.bounds[l * 2 * d + k].min(self.bounds[r * 2 * d + k]);
+                    let hi = self.bounds[l * 2 * d + d + k].max(self.bounds[r * 2 * d + d + k]);
+                    self.bounds[id * 2 * d + k] = lo;
+                    self.bounds[id * 2 * d + d + k] = hi;
+                }
+                self.lmax[id] = self.bounds[l * 2 * d + d + node.dim];
+            }
         }
     }
 
@@ -204,6 +297,7 @@ impl<T: Scalar> Builder<T> {
             self.bounds
                 .extend_from_slice(&b.bounds[k * d2..(k + 1) * d2]);
             self.splits.push(b.splits[k]);
+            self.lmax.push(b.lmax[k]);
         };
         push(&left, 0, &map_left);
         push(&right, 0, &map_right);
@@ -217,6 +311,22 @@ impl<T: Scalar> Builder<T> {
     }
 }
 
+/// The bounding box of the points `perm` (non-empty): `d` lower, then `d` upper bounds.
+fn bbox<T: Scalar>(points: &Points<T>, perm: &[usize]) -> Vec<T> {
+    let d = points.dims();
+    let mut bx = Vec::with_capacity(2 * d);
+    bx.extend_from_slice(points.row(perm[0]));
+    bx.extend_from_slice(points.row(perm[0]));
+    let (lo, hi) = bx.split_at_mut(d);
+    for &i in &perm[1..] {
+        for (k, &v) in points.row(i).iter().enumerate() {
+            lo[k] = lo[k].min(v);
+            hi[k] = hi[k].max(v);
+        }
+    }
+    bx
+}
+
 impl<T: Scalar> KdTree<T> {
     /// Builds the tree on up to `n_threads` threads. Takes ownership of the points,
     /// whose memory is released once they are copied into tree order.
@@ -228,11 +338,11 @@ impl<T: Scalar> KdTree<T> {
         let n = points.len();
         let d = points.dims();
         let mut perm: Vec<usize> = (0..n).collect();
-        let (nodes, bounds, splits) = if n > 0 {
-            let b = Builder::build(&points, &mut perm, 0, leaf_size.max(1), n_threads);
-            (b.nodes, b.bounds, b.splits)
+        let (nodes, bounds, splits, lmax) = if n > 0 {
+            let b = Builder::build(&points, &mut perm, 0, leaf_size.max(1), n_threads, None);
+            (b.nodes, b.bounds, b.splits, b.lmax)
         } else {
-            (Vec::new(), Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         };
         // Copy into tree order. (Permuting in place would save this copy, but chasing
         // the permutation's cycles is several times slower.) The original order is
@@ -249,6 +359,7 @@ impl<T: Scalar> KdTree<T> {
             nodes,
             bounds,
             splits,
+            lmax,
         }
     }
 
@@ -265,13 +376,12 @@ impl<T: Scalar> KdTree<T> {
     fn row(&self, pos: usize) -> &[T] {
         &self.data[pos * self.d..(pos + 1) * self.d]
     }
-}
 
-impl<T: Scalar> Searcher<T> for KdTree<T> {
-    const SORTED: bool = false;
-
-    fn search<M: Distance<T>>(
+    /// Searches the subtree under `root`, pruning with the bounding boxes.
+    #[allow(clippy::too_many_arguments)]
+    fn search_from<M: Distance<T>>(
         &self,
+        root: usize,
         m: &M,
         q: &[T],
         th: &Thresholds<T>,
@@ -279,12 +389,9 @@ impl<T: Scalar> Searcher<T> for KdTree<T> {
         stack: &mut Vec<usize>,
         emit: &mut impl FnMut(usize, T),
     ) {
-        if self.nodes.is_empty() {
-            return;
-        }
         let d = self.d;
         stack.clear();
-        stack.push(0);
+        stack.push(root);
         while let Some(id) = stack.pop() {
             let node = self.nodes[id];
             let (lo, hi) = self.bounds[id * 2 * d..(id + 1) * 2 * d].split_at(d);
@@ -322,6 +429,50 @@ impl<T: Scalar> Searcher<T> for KdTree<T> {
             }
         }
     }
+}
+
+impl<T: Scalar> Searcher<T> for KdTree<T> {
+    const SORTED: bool = false;
+
+    /// Walks down the child that contains `q` by the split values alone. At every
+    /// level the other child is checked with a one-dimensional bound (its distance
+    /// to `q` along the split dimension is a lower bound of its box distance) and
+    /// searched with its boxes only if it may hold a match. This visits about two
+    /// nodes per level only where needed instead of everywhere.
+    fn search<M: Distance<T>>(
+        &self,
+        m: &M,
+        q: &[T],
+        th: &Thresholds<T>,
+        want_dist: bool,
+        stack: &mut Vec<usize>,
+        emit: &mut impl FnMut(usize, T),
+    ) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let mut id = 0;
+        loop {
+            let node = self.nodes[id];
+            if node.left == 0 {
+                self.search_from(id, m, q, th, want_dist, stack, emit);
+                return;
+            }
+            let dim = node.dim;
+            let qk = &q[dim..dim + 1];
+            if q[dim] < self.splits[id] {
+                if m.box_min(qk, &[self.splits[id]], &[T::INFINITY]) <= th.prune {
+                    self.search_from(node.left + 1, m, q, th, want_dist, stack, emit);
+                }
+                id = node.left;
+            } else {
+                if m.box_min(qk, &[-T::INFINITY], &[self.lmax[id]]) <= th.prune {
+                    self.search_from(node.left, m, q, th, want_dist, stack, emit);
+                }
+                id = node.left + 1;
+            }
+        }
+    }
 
     fn n_locality_keys(&self) -> usize {
         self.len()
@@ -341,6 +492,40 @@ impl<T: Scalar> Searcher<T> for KdTree<T> {
             } else {
                 node.left + 1
             };
+        }
+    }
+
+    /// Descends eight queries in lockstep, so that their dependent node loads
+    /// overlap instead of waiting for each other.
+    fn locality_keys(&self, queries: &Points<T>, start: usize, out: &mut [usize]) {
+        const B: usize = 8;
+        let mut k = 0;
+        while k + B <= out.len() {
+            let mut ids = [0usize; B];
+            let mut pending = B;
+            while pending > 0 {
+                pending = 0;
+                for (j, id) in ids.iter_mut().enumerate() {
+                    let node = self.nodes[*id];
+                    if node.left == 0 {
+                        continue;
+                    }
+                    pending += 1;
+                    let q = queries.row(start + k + j);
+                    *id = if q[node.dim] < self.splits[*id] {
+                        node.left
+                    } else {
+                        node.left + 1
+                    };
+                }
+            }
+            for (slot, &id) in out[k..k + B].iter_mut().zip(&ids) {
+                *slot = self.nodes[id].start;
+            }
+            k += B;
+        }
+        for (j, slot) in out.iter_mut().enumerate().skip(k) {
+            *slot = self.locality_key(queries.row(start + j));
         }
     }
 }
@@ -381,10 +566,42 @@ mod tests {
     use super::*;
     use crate::metric::Euclidean;
 
+    fn test_points(n: usize, d: usize) -> Points<f64> {
+        let values: Vec<f64> = (0..(n * d) as u64)
+            .map(|i| ((i * 7919) % 100_003) as f64)
+            .collect();
+        Points::new(&values, n, d, false)
+    }
+
+    /// Every box is exactly the bounding box of its points, and `splits`/`lmax` are
+    /// the extremes of the children in the split dimension.
+    fn check_boxes(tree: &KdTree<f64>) {
+        let d = tree.d;
+        for (id, node) in tree.nodes.iter().enumerate() {
+            let (lo, hi) = tree.bounds[id * 2 * d..(id + 1) * 2 * d].split_at(d);
+            for k in 0..d {
+                let col = (node.start..node.end).map(|pos| tree.row(pos)[k]);
+                assert_eq!(lo[k], col.clone().fold(f64::INFINITY, f64::min));
+                assert_eq!(hi[k], col.fold(-f64::INFINITY, f64::max));
+            }
+            if node.left != 0 {
+                let (l, r) = (tree.nodes[node.left], tree.nodes[node.left + 1]);
+                let lmax = (l.start..l.end)
+                    .map(|pos| tree.row(pos)[node.dim])
+                    .fold(-f64::INFINITY, f64::max);
+                let rmin = (r.start..r.end)
+                    .map(|pos| tree.row(pos)[node.dim])
+                    .fold(f64::INFINITY, f64::min);
+                assert_eq!(tree.lmax[id], lmax);
+                assert_eq!(tree.splits[id], rmin);
+                assert!(lmax <= rmin);
+            }
+        }
+    }
+
     #[test]
     fn tree_holds_every_point_once() {
-        let values: Vec<f64> = (0..1000).map(|i| ((i * 7919) % 1000) as f64).collect();
-        let points = Points::new(&values, 500, 2, false);
+        let points = test_points(500, 2);
         let tree = KdTree::with_leaf_size(points.clone(), 4, 1);
         let mut idx = tree.idx.clone();
         idx.sort_unstable();
@@ -399,22 +616,22 @@ mod tests {
                 assert_eq!((l.start, l.end, r.end), (node.start, r.start, node.end));
             }
         }
+        check_boxes(&tree);
     }
 
     #[test]
     fn parallel_build_equals_serial_build() {
         // More points than PARALLEL_BUILD_MIN, so the build really splits up.
         let n = 2 * PARALLEL_BUILD_MIN;
-        let values: Vec<f64> = (0..3 * n as u64)
-            .map(|i| ((i * 7919) % 100_003) as f64)
-            .collect();
-        let points = Points::new(&values, n, 3, false);
+        let points = test_points(n, 3);
         let serial = KdTree::with_leaf_size(points.clone(), 8, 1);
+        check_boxes(&serial);
         for threads in [2, 3, 8] {
             let parallel = KdTree::with_leaf_size(points.clone(), 8, threads);
             assert_eq!(parallel.idx, serial.idx);
             assert_eq!(parallel.data, serial.data);
             assert_eq!(parallel.nodes.len(), serial.nodes.len());
+            check_boxes(&parallel);
             // Same tree, different node numbering: compare it structurally.
             fn walk(t: &KdTree<f64>, id: usize, out: &mut Vec<(usize, usize, usize)>) {
                 let n = t.nodes[id];
@@ -448,5 +665,17 @@ mod tests {
             &mut |i, _| found.push(i),
         );
         assert_eq!(found.len(), 100);
+    }
+
+    #[test]
+    fn batched_keys_equal_single_keys() {
+        let tree = KdTree::with_leaf_size(test_points(3000, 2), 8, 1);
+        let queries = test_points(1003, 2);
+        let mut batched = vec![0; queries.len()];
+        tree.locality_keys(&queries, 0, &mut batched);
+        let single: Vec<usize> = (0..queries.len())
+            .map(|i| tree.locality_key(queries.row(i)))
+            .collect();
+        assert_eq!(batched, single);
     }
 }
