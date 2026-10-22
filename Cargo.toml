@@ -1,0 +1,23 @@
+[package]
+name = "close-numerical-matches"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust core for the close-numerical-matches Python package"
+license = "MIT"
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+numpy = "0.30.0"
+pyo3 = "0.30.1"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+# Faster than unwinding (about 8% with many matches). No code path that users can
+# reach panics; if one did, it would abort the process instead of raising.
+panic = "abort"

@@ -1,29 +1,31 @@
 [build-system]
-requires = ["setuptools", "wheel", "mypy", "numpy"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
 
 [project]
-name = "close_numerical_matches"
-description = "Finds close numerical matches across two arrays."
+name = "close-numerical-matches"
+description = "Finds close numerical matches across two arrays, fast."
 readme = "README.md"
 authors = [{ name = "Soeren Mulvad", email = "shmulvad@gmail.com" }]
 license = { file = "LICENSE" }
+keywords = ["numpy", "nearest neighbors", "fixed-radius search", "kd-tree", "matching"]
 classifiers = [
-  "License :: OSI Approved :: MIT License",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Topic :: Software Development :: Libraries",
-  "Typing :: Typed",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
 ]
-dependencies = ["numpy"]
-requires-python = ">=3.8"
+dependencies = ["numpy>=1.24"]
+requires-python = ">=3.11"
 dynamic = ["version"]
-
-[tool.setuptools]
-packages = ["close_numerical_matches"]
 
 [project.urls]
 Documentation = "https://github.com/shmulvad/close_numerical_matches/"
@@ -33,16 +35,52 @@ Github = "https://github.com/shmulvad/close_numerical_matches"
 Source = "https://github.com/shmulvad/close_numerical_matches"
 Issues = "https://github.com/shmulvad/close_numerical_matches/issues"
 
-[tool.ruff]
-exclude = [
-    ".git",
-    "*.pyc",
-    "__pycache__",
+[tool.maturin]
+module-name = "close_numerical_matches._core"
+include = [{ path = "close_numerical_matches/py.typed", format = ["sdist", "wheel"] }]
+exclude = ["tests/**", "benchmarks/**"]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.140.0",
+    "maturin>=1.15.0",
+    "prek>=0.5.5",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
 ]
-ignore = ["S101", "ANN101", "B904", "COM812", "E203"]
-line-length = 127
-# See https://beta.ruff.rs/docs/rules/ for more information
-select = [
+bench = ["scipy>=1.16.0"]
+
+[tool.uv]
+# Rebuild the extension when the Rust code changes.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]
+
+[tool.pytest]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config"]
+
+[tool.pyright]
+include = ["close_numerical_matches", "tests", "benchmarks"]
+exclude = ["**/__pycache__", ".venv"]
+# numpy's own stubs need 3.12 (`collections.abc.Buffer`); ruff enforces 3.11 syntax.
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+strict = ["close_numerical_matches"]
+reportUnnecessaryTypeIgnoreComment = "error"
+# `close_numerical_matches._core` is the compiled extension; its types come from
+# `_core.pyi`, so type checking does not need it to be built.
+reportMissingModuleSource = "none"
+
+[tool.ruff]
+fix = false
+lint.ignore = ["S101", "B904", "COM812", "E203"]
+# See https://docs.astral.sh/ruff/rules/ for more information
+lint.select = [
     "C9",
     "E",
     "F",
@@ -51,7 +89,6 @@ select = [
     "I",
     "N",
     "UP",
-    # "ANN",
     "A",
     "S",
     "COM",
@@ -59,22 +96,29 @@ select = [
     "ICN",
     "PIE",
     "Q",
-    # "TCH",
     "PTH",
     "NPY",
     "RUF",
 ]
-ignore-init-module-imports = true
-target-version = "py38"
+line-length = 88
+target-version = "py311"
 
 [tool.ruff.format]
 quote-style = "single"
 
-[tool.ruff.flake8-quotes]
+[tool.ruff.lint.per-file-ignores]
+# Seeded randomness and subprocesses are fine in tests and benchmarks.
+"tests/**" = ["S311", "S603"]
+"benchmarks/**" = ["S311", "S603", "S607"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.lint.flake8-quotes]
 docstring-quotes = "double"
 inline-quotes = "single"
 multiline-quotes = "double"
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 force-single-line = true
 required-imports = ["from __future__ import annotations"]

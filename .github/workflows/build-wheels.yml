@@ -4,57 +4,95 @@ on:
   push:
     tags:
       - "*"
+  # Manual runs build all wheels as a dry run; only tags publish.
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  mac-and-windows-and-linux-publish:
-    name: Wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  wheels:
+    name: Wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [macOS-latest, ubuntu-latest, windows-latest]
+        platform:
+          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: auto }
+          - { os: macos-latest, target: aarch64 }
+          - { os: macos-15-intel, target: x86_64 }
+          - { os: windows-latest, target: x64 }
+    defaults:
+      run:
+        shell: bash
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.12
-      uses: actions/setup-python@v4
-      with:
-        python-version: 3.12
-    - name: Install deps
-      run: python -m pip install cibuildwheel==2.16.2 twine==4.0.2 numpy
-    - name: Build wheels
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
-      env:
-        CIBW_PROJECT_REQUIRES_PYTHON: ">=3.8.0"
-        CIBW_BUILD: "cp3*"
-        CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
-        CIBW_ARCHS_LINUX: "auto64"
-        CIBW_ARCHS_WINDOWS: "x86 AMD64 ARM64"
-      run: python -m cibuildwheel --output-dir wheelhouse
-    - name: Publish
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: twine upload --skip-existing wheelhouse/*
-  pure-python-wheel-publish:
-    name: Pure Python Wheels
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # One wheel per supported CPython version, regular and free-threaded. On Linux
+      # the manylinux container provides the interpreters.
+      - name: Choose interpreters (Linux)
+        if: runner.os == 'Linux'
+        run: echo "INTERPRETERS=python3.11 python3.12 python3.13 python3.14 python3.14t python3.15 python3.15t" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        if: runner.os != 'Linux'
+      - name: Install interpreters (macOS, Windows)
+        if: runner.os != 'Linux'
+        run: |
+          uv python install 3.11 3.12 3.13 3.14 3.14t 3.15 3.15t
+          interpreters=""
+          # `+gil` so that 3.14/3.15 never resolve to the free-threaded build.
+          for v in 3.11 3.12 3.13 3.14+gil 3.14t 3.15+gil 3.15t; do
+            interpreters="$interpreters $(uv python find --no-project "$v")"
+          done
+          echo "INTERPRETERS=$interpreters" >> "$GITHUB_ENV"
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist --interpreter ${{ env.INTERPRETERS }}
+      - name: Check that every interpreter got a wheel
+        run: |
+          ls dist
+          for tag in cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t cp315-cp315 cp315-cp315t; do
+            ls dist/*-"$tag"-*.whl > /dev/null || { echo "Missing $tag wheel"; exit 1; }
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    name: Source distribution
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.12
-      uses: actions/setup-python@v4
-      with:
-        python-version: 3.12
-    - name: Install deps
-      run: python -m pip install wheel==0.41.3 twine==4.0.2 numpy
-    - name: Build pure python wheel
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
-      env:
-        SS_SKIP_COMPILE: "1"
-      run: pip wheel -w wheelhouse .
-    - name: Publish
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: twine upload --skip-existing wheelhouse/*
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-sdist
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [wheels, sdist]
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Publish
+        run: uv publish --check-url https://pypi.org/simple/ dist/*
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
