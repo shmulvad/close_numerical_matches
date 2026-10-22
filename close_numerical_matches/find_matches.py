@@ -1,289 +1,196 @@
+"""Typed Python front end of the Rust core in `close_numerical_matches._core`."""
+
 from __future__ import annotations
 
-import itertools
-from typing import Callable
-from typing import Generator
-from typing import Union
+from typing import Any
+from typing import Literal
+from typing import TypeAlias
+from typing import cast
+from typing import final
+from typing import overload
 
 import numpy as np
+from numpy.typing import ArrayLike
+from numpy.typing import NDArray
 
-DistFunc = Callable[[np.ndarray, np.ndarray], np.ndarray]
-DistFuncArg = Union[str, DistFunc]
-NORM, MAX, COS = 'norm', 'max', 'cos'
+from close_numerical_matches import _core
 
-OVERHEAD_MULT = 5
-DELTAS_1D = [-1, 0, 1]
+Metric: TypeAlias = Literal[
+    'euclidean',
+    'sqeuclidean',
+    'manhattan',
+    'chebyshev',
+    'minkowski',
+    'cosine',
+    'norm',
+    'l2',
+    'cityblock',
+    'l1',
+    'max',
+    'linf',
+    'cos',
+]
+"""
+The supported distance metrics. Aliases: `norm`/`l2` (euclidean), `cityblock`/`l1`
+(manhattan), `max`/`linf` (chebyshev) and `cos` (cosine).
+"""
 
+Matches: TypeAlias = NDArray[np.int64]
+"""A `(k, 2)` array of matching row indices `[i, j]`, sorted lexicographically."""
 
-def _normalize_vectors(arr: np.ndarray) -> np.ndarray:
-    """
-    Takes an array and returns a copy of it where each row has been
-    normalized to unit norm
-    """
-    return arr / np.linalg.norm(arr, axis=1).reshape(-1, 1)
+Distances: TypeAlias = NDArray[np.floating[Any]]
+"""A `(k,)` array with the distance of each match."""
 
+FloatDType: TypeAlias = type[np.float32] | type[np.float64]
 
-def _norm(arr: np.ndarray, row: np.ndarray) -> np.ndarray:
-    return np.linalg.norm(arr - row, axis=1)
-
-
-def _max_abs(arr: np.ndarray, row: np.ndarray) -> np.ndarray:
-    return np.max(np.abs(arr - row), axis=1)
-
-
-def _cosine_dist(arr: np.ndarray, row: np.ndarray) -> np.ndarray:
-    num = arr @ row
-    denom = np.linalg.norm(arr, axis=1) * np.linalg.norm(row)
-    cosine_sim = num / denom
-    # Value is now similarity in [-1, 1] so we want to
-    # convert to distance in [0, 2]
-    return 1.0 - cosine_sim
-
-
-DIST_FUNCS: dict[str, DistFunc] = {
-    NORM: _norm,
-    MAX: _max_abs,
-    COS: _cosine_dist,
-}
+METRICS: tuple[str, ...] = tuple(_core.METRIC_NAMES)
 
 
-def _get_dist_func(dist_metric: DistFuncArg) -> DistFunc:
-    """Returns the appropriate distance function for a given dist_metric"""
-    if isinstance(dist_metric, str):
-        if dist_metric in DIST_FUNCS:
-            return DIST_FUNCS[dist_metric]
-
-        raise ValueError(
-            'If dist_metric is a string, it has to be one of ' + f'{list(DIST_FUNCS.keys())} but got "{dist_metric}"',
+def _check_dist(dist: object) -> str:
+    if isinstance(dist, str):
+        return dist
+    if callable(dist):
+        raise TypeError(
+            'Custom distance functions are not supported since version 0.3.0. '
+            f'Use one of the built-in metrics: {", ".join(METRICS)}',
         )
-
-    if callable(dist_metric):
-        test_res = dist_metric(np.array([[1]]), np.array([1]))
-        is_valid = isinstance(test_res, np.ndarray) and len(test_res.shape) == 1 and len(test_res) == 1
-        if is_valid:
-            return dist_metric
-
-        raise ValueError(
-            "Supplied distance function doesn't return array of expected shape",
-        )
-
-    raise ValueError('Got distance metric of unexpected type')
+    raise TypeError(f'dist must be a string, got {type(dist).__name__}')
 
 
-def _naive_find_matches(
-    arr0: np.ndarray,
-    arr0_indices: Union[list[int], np.ndarray],  # noqa: UP007
-    arr1: np.ndarray,
-    arr1_indices: Union[list[int], np.ndarray],  # noqa: UP007
-    dist_func: DistFunc,
+def _as_2d(arr: ArrayLike, name: str) -> NDArray[Any]:
+    """`arr` as a 2-D array of real numbers; a 1-D array becomes a single column."""
+    a = np.asarray(arr)
+    if a.ndim == 1:
+        a = a.reshape(-1, 1)
+    elif a.ndim != 2:
+        raise ValueError(f'{name} must be a 1-D or 2-D array, got {a.ndim} dimensions')
+    if a.dtype.kind not in 'biuf':
+        raise TypeError(f'{name} must contain real numbers, got dtype {a.dtype}')
+    return a
+
+
+def _float_dtype(*arrays: NDArray[Any]) -> FloatDType:
+    """float32 if every array is float32 (or float16), otherwise float64."""
+    if all(a.dtype.kind == 'f' and a.dtype.itemsize <= 4 for a in arrays):
+        return np.float32
+    return np.float64
+
+
+def _find(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric,
     tol: float,
-) -> list[list[int]]:
-    """
-    Finds matching indices within tolerance using nested for-loop approach.
-    Only considers the indices given by the `arr0_indices` and `arr1_indices`
-    parameters. Runtime is O(nmk) for two arrays of shape (n, k) and (m, k)
-
-    Returns
-    -------
-    `matches` : `List[List[int]]`
-        List of 2-length lists of integers corresponding to matching indices
-
-    Examples
-    --------
-    >>> arr0 = np.array([[5.5, 4.5], [2.5, 1.5], [20.1, 20.1]])
-    >>> arr1 = np.array([[2.4, 1.6], [5.5, 4.4], [5.5, 4.6], [4.0, 4.0]])
-    >>> _naive_find_matches(arr0, [0, 1, 2], arr1, [0, 1, 2, 3], tol=0.2)
-    [[0, 1], [0, 2], [1, 0]]
-    """
-    reverse = False
-    if len(arr0_indices) > len(arr1_indices):
-        reverse = True
-        arr0, arr0_indices, arr1, arr1_indices = arr1, arr1_indices, arr0, arr0_indices
-
-    matches: list[list[int]] = []
-    arr1_filtered = arr1[arr1_indices]
-    for arr0_idx in arr0_indices:
-        arr0_idx = int(arr0_idx)
-        row = arr0[arr0_idx]
-        inner_diff = dist_func(arr1_filtered, row)
-        inner_matches_idx = np.where(inner_diff <= tol)[0]
-        new_matches: list[list[int]] = [[arr0_idx, int(arr1_indices[i])] for i in inner_matches_idx]
-        matches.extend(new_matches)
-
-    if matches and reverse:
-        matches = list(np.array(matches)[::, ::-1])
-
-    return matches
-
-
-def _assign_to_buckets(
-    arr0: np.ndarray,
-    arr1: np.ndarray,
-    bucket_tol: float,
-) -> dict[tuple[int, ...], tuple[list[int], list[int]]]:
-    """
-    Takes two 2D arrays of numbers and a tolerance `bucket_tol` and assigns
-    their indices to buckets based on these values
-    """
-    buckets: dict[tuple[int, ...], tuple[list[int], list[int]]] = {}
-
-    def assign_arr_to_buckets(arr: np.ndarray, arr_num: int) -> None:
-        for i, row in enumerate(arr):
-            key = tuple(int(elm // bucket_tol) for elm in row)
-            if key not in buckets:
-                buckets[key] = ([], [])
-
-            buckets[key][arr_num].append(i)
-
-    assign_arr_to_buckets(arr0, 0)
-    assign_arr_to_buckets(arr1, 1)
-    return buckets
-
-
-def _make_deltas_iter(dim: int) -> Generator[tuple[int, ...], None, None]:
-    """
-    Constructs the delta values to use together with the base element for a
-    given dimension to visit all neighbors and the base element itself
-
-    Examples
-    --------
-    >>> list(_make_deltas_iter(1))
-    [(-1,), (0,), (1,)]
-    >>> list(_make_deltas_iter(2))
-    [(-1, -1), (-1, 0), (-1, 1),
-     (0, -1), (0, 0), (0, 1),
-     (1, -1), (1, 0), (1, 1)]
-    """
-    yield from itertools.product(*tuple([DELTAS_1D] * dim))
-
-
-def _bucket_keys_to_check(
-    key: tuple[int, ...],
-    deltas_iter: list[tuple[int, ...]],
-) -> list[tuple[int, ...]]:
-    """
-    Returns a list of the keys to iterate for a given key and the deltas
-
-    Examples
-    --------
-    >>> _bucket_keys_to_check((5,), _make_deltas_iter(1))
-    [(4,), (5,), (6,)]
-    >>> _bucket_keys_to_check((5, 7), _make_deltas_iter(2))
-    [(4, 6), (4, 7), (4, 8), (5, 6), (5, 7), (5, 8), (6, 6), (6, 7), (6, 8)]
-    """
-    return [tuple(key_elm + delta for key_elm, delta in zip(key, deltas)) for deltas in deltas_iter]
-
-
-def naive_find_matches(
-    arr0: Union[np.ndarray, list[list[Union[int, float]]]],  # noqa: UP007
-    arr1: Union[np.ndarray, list[list[Union[int, float]]]],  # noqa: UP007
-    dist: DistFuncArg = NORM,
-    tol: float = 0.1,
-) -> np.ndarray:
-    """
-    Finds matching indices within tolerance using nested for-loop approach.
-    parameters. Runtime is O(nmd) for two arrays of shape (n, d) and (m, d)
-
-    Parameters
-    ----------
-    arr0 : np.ndarray
-        First array to find matches against. Should be of size (n, d).
-
-    arr1 : np.ndarray
-        Second array to find matches against. Should be of size (m, d).
-
-    dist : {'norm', 'max', 'cos'} or Callable[[np.ndarray, np.ndarray], np.ndarray]
-        Distance metric to calculate distance. `'norm'`, `'max'` and `'cos'` are
-        currently supported. If you want some other distance function, you can
-        supply your own function. It should take an (n, d) array and (d,) array
-        as argument and return an (n,) array.
-
-    tol : float, default=0.1
-        The tolerance where values are considered the similar enough to count
-        as a match. Should be > 0.
-
-    Returns
-    -------
-    matches : np.ndarray
-        Array of corresponding indices of the numerical matches in the arrays.
-
-    Examples
-    --------
-    >>> arr0 = np.array([[5.5, 4.5], [2.5, 1.5], [20.1, 20.1]])
-    >>> arr1 = np.array([[2.4, 1.6], [5.5, 4.4], [5.5, 4.6], [4.0, 4.0]])
-    >>> naive_find_matches(arr0, arr1, tol=0.2)
-    array([[0, 1], [0, 2], [1, 0]])
-    >>> naive_find_matches(arr0, arr1, tol=0.11)
-    array([[0, 1], [0, 2]])
-    >>> naive_find_matches(arr0, arr1, dist='max', tol=0.11)
-    array([[0, 1], [0, 2], [1, 0]])
-    """
-    # Construct ndarrays if pure Python lists are passed in
-    arr0 = np.array(arr0, copy=False)
-    arr1 = np.array(arr1, copy=False)
-
-    assert len(arr0.shape) == len(arr1.shape) == 2, f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
-
-    assert arr0.shape[1] == arr1.shape[1], (
-        'Arrays should be of equivalent size in the second axis, but got' + f' {arr0.shape[1]} and {arr1.shape[1]}'
+    p: float | None,
+    n_threads: int | None,
+    return_distances: bool,
+    naive: bool,
+) -> Matches | tuple[Matches, Distances]:
+    dist = cast('Metric', _check_dist(dist))
+    a0, a1 = _as_2d(arr0, 'arr0'), _as_2d(arr1, 'arr1')
+    dtype = _float_dtype(a0, a1)
+    return _core.find_matches(
+        np.ascontiguousarray(a0, dtype=dtype),
+        np.ascontiguousarray(a1, dtype=dtype),
+        dist,
+        tol,
+        p,
+        n_threads,
+        return_distances,
+        naive,
     )
 
-    assert tol > 0, f'Tolerance has to be strictly positive but got {tol}'
 
-    if dist == COS:
-        arr0, arr1 = _normalize_vectors(arr0), _normalize_vectors(arr1)
-
-    matches = _naive_find_matches(
-        arr0=arr0,
-        arr0_indices=np.arange(len(arr0)),
-        arr1=arr1,
-        arr1_indices=np.arange(len(arr1)),
-        dist_func=_get_dist_func(dist),
-        tol=tol,
-    )
-    return np.array(matches, dtype=np.int64)
-
-
+@overload
 def find_matches(
-    arr0: np.ndarray,
-    arr1: np.ndarray,
-    dist: DistFuncArg = NORM,
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
     tol: float = 0.1,
-    bucket_tol_mult: float = 2.0,
-) -> np.ndarray:
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: Literal[False] = False,
+) -> Matches: ...
+@overload
+def find_matches(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
+    tol: float = 0.1,
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: Literal[True],
+) -> tuple[Matches, Distances]: ...
+@overload
+def find_matches(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
+    tol: float = 0.1,
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: bool,
+) -> Matches | tuple[Matches, Distances]: ...
+def find_matches(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
+    tol: float = 0.1,
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: bool = False,
+) -> Matches | tuple[Matches, Distances]:
     """
-    Finds all numerical matches in two 2D ndarrays of shape (n, d) and (m, d)
-    that are within tolerance level and returns the indices. Works best for
-    small d and large n and m where there are relatively few matches.
+    Finds all pairs of rows `(i, j)` where `arr0[i]` and `arr1[j]` are within `tol`
+    of each other. Builds a KD-tree over the smaller array and searches it with the
+    rows of the larger one.
 
     Parameters
     ----------
-    arr0 : np.ndarray
-        First array to find matches against. Should be of size (n, d).
+    arr0 : array_like
+        First array, of shape (n, d). A 1-D array is treated as (n, 1).
 
-    arr1 : np.ndarray
-        Second array to find matches against. Should be of size (m, d).
+    arr1 : array_like
+        Second array, of shape (m, d). A 1-D array is treated as (m, 1).
 
-    dist : {'norm', 'max', 'cos'} or Callable[[np.ndarray, np.ndarray], np.ndarray]
-        Distance metric to calculate distance. `'norm'`, `'max'` and `'cos'` are
-        currently supported. If you want some other distance function, you can
-        supply your own function. It should take an (n, d) array and (d,) array
-        as argument and return an (n,) array.
+    dist : str, default='euclidean'
+        The distance metric: 'euclidean', 'sqeuclidean', 'manhattan', 'chebyshev',
+        'minkowski' or 'cosine' (aliases: 'norm', 'l2', 'cityblock', 'l1', 'max',
+        'linf', 'cos').
 
     tol : float, default=0.1
-        The tolerance where values are considered the similar enough to count
-        as a match. Should be > 0.
+        Pairs with a distance of at most `tol` match. Must be >= 0.
 
-    bucket_tol_mult : float, default=2.0
-        The tolerance multiplier to use for assigning buckets. Can in some
-        instances make algorithm faster to tweak this. For cosine distance,
-        you likely want to set this much higher. Should never be less
-        than 1.
+    p : float, optional
+        The order of the Minkowski distance (>= 1, default 2, `inf` allowed). Only
+        allowed with `dist='minkowski'`.
+
+    n_threads : int or None, default=1
+        The number of threads to search with. `None` or 0 uses one per CPU core.
+        Small inputs use fewer threads. The GIL is released either way.
+
+    return_distances : bool, default=False
+        Also return the distance of each match.
 
     Returns
     -------
     matches : np.ndarray
-        Array of corresponding indices of the numerical matches in the arrays.
+        A (k, 2) int64 array of the matching indices `[i, j]`, sorted
+        lexicographically.
+
+    distances : np.ndarray
+        Only with `return_distances=True`: a (k,) array with the distance of each
+        match, float32 if both inputs are float32 and float64 otherwise.
+
+    Notes
+    -----
+    Rows that contain NaN or infinity never match, and nor do zero vectors with the
+    cosine distance. Both inputs are computed in float32 if both are float32 (or
+    float16), and in float64 otherwise.
 
     Examples
     --------
@@ -295,56 +202,195 @@ def find_matches(
     array([[0, 1], [0, 2]])
     >>> find_matches(arr0, arr1, dist='max', tol=0.11)
     array([[0, 1], [0, 2], [1, 0]])
+    >>> matches, distances = find_matches(arr0, arr1, tol=0.2, return_distances=True)
+    >>> distances.round(4)
+    array([0.1   , 0.1   , 0.1414])
     """
-    # Construct ndarrays if pure Python lists are passed in
-    arr0 = np.array(arr0, copy=False)
-    arr1 = np.array(arr1, copy=False)
+    return _find(arr0, arr1, dist, tol, p, n_threads, return_distances, naive=False)
 
-    assert len(arr0.shape) == len(arr1.shape) == 2, f'Arrays should be 2D but got {len(arr0.shape)} and {len(arr1.shape)}'
 
-    assert arr0.shape[1] == arr1.shape[1], (
-        'Arrays should be of equivalent size in the second axis, but got' + f' {arr0.shape[1]} and {arr1.shape[1]}'
-    )
+@overload
+def naive_find_matches(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
+    tol: float = 0.1,
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: Literal[False] = False,
+) -> Matches: ...
+@overload
+def naive_find_matches(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
+    tol: float = 0.1,
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: Literal[True],
+) -> tuple[Matches, Distances]: ...
+@overload
+def naive_find_matches(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
+    tol: float = 0.1,
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: bool,
+) -> Matches | tuple[Matches, Distances]: ...
+def naive_find_matches(
+    arr0: ArrayLike,
+    arr1: ArrayLike,
+    dist: Metric = 'euclidean',
+    tol: float = 0.1,
+    *,
+    p: float | None = None,
+    n_threads: int | None = 1,
+    return_distances: bool = False,
+) -> Matches | tuple[Matches, Distances]:
+    """
+    Like `find_matches`, but compares every row of `arr0` with every row of `arr1`,
+    in O(n * m * d) time. Useful as a reference, and for tiny or very
+    high-dimensional inputs where a tree cannot prune anything.
 
-    assert tol > 0, f'Tolerance has to be strictly positive but got {tol}'
-    assert bucket_tol_mult >= 1.0, f'bucket_tol_mult should be >= 1 but got {bucket_tol_mult}'
+    >>> naive_find_matches([[0.0], [1.0]], [[0.05], [3.0]], tol=0.1)
+    array([[0, 0]])
+    """
+    return _find(arr0, arr1, dist, tol, p, n_threads, return_distances, naive=True)
 
-    if dist == COS:
-        arr0, arr1 = _normalize_vectors(arr0), _normalize_vectors(arr1)
 
-    buckets = _assign_to_buckets(arr0, arr1, bucket_tol_mult * tol)
+@final
+class MatchIndex:
+    """
+    A KD-tree over the rows of `arr`, built once and searched many times with
+    `query`. `MatchIndex(arr1).query(arr0, tol)` returns the same as
+    `find_matches(arr0, arr1, tol=tol)` when both arrays have the same dtype. The
+    index always computes in its own dtype: a float32 index converts float64 queries
+    to float32, where `find_matches` would compute in float64. One-dimensional data is
+    searched with the tree too, where `find_matches` sorts and sweeps instead.
 
-    # Check if O(nmd) < O(bd^3) * const in which case it makes better sense
-    # to run naive algorithm
-    n, m, b, d = len(arr0), len(arr1), len(buckets), arr0.shape[1]
-    if n * m * d < b * d**3 * OVERHEAD_MULT:
-        return naive_find_matches(arr0, arr1, dist, tol)
+    The index is immutable, so it can be shared by several threads.
 
-    dist_func = _get_dist_func(dist)
-    deltas_iter = list(_make_deltas_iter(d))
-    matches = []
-    for key, bucket in buckets.items():
-        arr0_indices = bucket[0]
-        if not arr0_indices:
-            continue
+    Parameters
+    ----------
+    arr : array_like
+        The points to index, of shape (m, d). A 1-D array is treated as (m, 1). The
+        index computes in float32 if `arr` is float32 (or float16), otherwise in
+        float64. The data is copied, so later changes to `arr` do not affect it.
 
-        # Collect all indices from arr1 from this + neighboring buckets
-        arr1_indices = []
-        for bucket_key in _bucket_keys_to_check(key, deltas_iter):
-            if bucket_key in buckets:
-                arr1_indices.extend(buckets[bucket_key][1])
+    dist : str, default='euclidean'
+        The distance metric, as for `find_matches`.
 
-        if not arr1_indices:
-            continue
+    p : float, optional
+        The order of the Minkowski distance, as for `find_matches`.
 
-        matches_inner = _naive_find_matches(
-            arr0=arr0,
-            arr0_indices=arr0_indices,
-            arr1=arr1,
-            arr1_indices=arr1_indices,
-            dist_func=dist_func,
-            tol=tol,
+    n_threads : int or None, default=1
+        The number of threads to build the tree with. `None` or 0 uses one per CPU
+        core.
+
+    Examples
+    --------
+    >>> index = MatchIndex([[0.0, 0.0], [1.0, 1.0], [5.0, 5.0]])
+    >>> index.query([[0.9, 1.0], [5.0, 5.05]], tol=0.15)
+    array([[0, 1], [1, 2]])
+    >>> index.query([[0.9, 1.0], [5.0, 5.05]], tol=0.01)
+    array([], shape=(0, 2), dtype=int64)
+    """
+
+    __slots__ = ('_index',)
+
+    def __init__(
+        self,
+        arr: ArrayLike,
+        dist: Metric = 'euclidean',
+        *,
+        p: float | None = None,
+        n_threads: int | None = 1,
+    ) -> None:
+        name = _check_dist(dist)
+        a = _as_2d(arr, 'arr')
+        values = np.ascontiguousarray(a, dtype=_float_dtype(a))
+        self._index = _core.MatchIndex(values, name, p, n_threads)
+
+    @overload
+    def query(
+        self,
+        other: ArrayLike,
+        tol: float = 0.1,
+        *,
+        n_threads: int | None = 1,
+        return_distances: Literal[False] = False,
+    ) -> Matches: ...
+    @overload
+    def query(
+        self,
+        other: ArrayLike,
+        tol: float = 0.1,
+        *,
+        n_threads: int | None = 1,
+        return_distances: Literal[True],
+    ) -> tuple[Matches, Distances]: ...
+    @overload
+    def query(
+        self,
+        other: ArrayLike,
+        tol: float = 0.1,
+        *,
+        n_threads: int | None = 1,
+        return_distances: bool,
+    ) -> Matches | tuple[Matches, Distances]: ...
+    def query(
+        self,
+        other: ArrayLike,
+        tol: float = 0.1,
+        *,
+        n_threads: int | None = 1,
+        return_distances: bool = False,
+    ) -> Matches | tuple[Matches, Distances]:
+        """
+        Finds all pairs `(i, j)` where `other[i]` and the indexed row `j` are within
+        `tol` of each other, sorted lexicographically. `other` is converted to the
+        dtype of the index (see `dtype`), and the distances have that dtype too. The
+        other arguments and the return value are as for `find_matches`.
+        """
+        values = np.ascontiguousarray(_as_2d(other, 'other'), dtype=self.dtype)
+        return self._index.query(values, tol, n_threads, return_distances)
+
+    @property
+    def n_points(self) -> int:
+        """The number of indexed rows."""
+        return self._index.n_points
+
+    @property
+    def n_dims(self) -> int:
+        """The number of columns of the indexed rows."""
+        return self._index.n_dims
+
+    @property
+    def dist(self) -> str:
+        """The canonical name of the distance metric, e.g. 'euclidean' for 'norm'."""
+        return self._index.dist
+
+    @property
+    def p(self) -> float | None:
+        """The order of the Minkowski distance, or None for the other metrics."""
+        return self._index.p
+
+    @property
+    def dtype(self) -> np.dtype[np.floating[Any]]:
+        """The dtype the index computes in (float32 or float64)."""
+        return np.dtype(self._index.dtype)
+
+    def __len__(self) -> int:
+        return self.n_points
+
+    def __repr__(self) -> str:
+        p = '' if self.p is None else f', p={self.p}'
+        return (
+            f'MatchIndex(n_points={self.n_points}, n_dims={self.n_dims}, '
+            f'dist={self.dist!r}{p}, dtype={self.dtype})'
         )
-        matches.extend(matches_inner)
-
-    return np.array(matches, dtype=np.int64)
